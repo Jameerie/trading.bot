@@ -1,0 +1,32 @@
+# Run the advisor with one command:  docker compose up -d
+#
+# By default the port is published only on the loopback interface, so the app is
+# reachable from this machine and nothing else. To use it from a phone on the
+# same wifi, change the mapping to "8787:8787" and set TRADING_BOT_TOKEN.
+
+services:
+  advisor:
+    build: .
+    image: trading-bot:latest
+    container_name: trading-bot
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      # Uncomment to require a token. Generate one with:
+      #   python -c "import secrets; print(secrets.token_urlsafe(24))"
+      # TRADING_BOT_TOKEN: "replace-me"
+      #
+      # Only needed for live REST data; leave unset to use CSV or synthetic.
+      TRADING_BOT_API_KEY: "${TRADING_BOT_API_KEY:-}"
+    volumes:
+      # Signal journal survives container rebuilds.
+      - ./reports:/app/reports
+      # Drop your own broker CSV exports in here.
+      - ./data/samples:/app/data/samples:ro
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request as u; u.urlopen('http://127.0.0.1:8787/api/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

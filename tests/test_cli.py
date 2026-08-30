@@ -142,6 +142,86 @@ class TestDataCommand:
         assert main(["data"]) == 1
 
 
+class TestRiskCommand:
+    def test_assumed_rate(self, capsys):
+        assert main(["risk", "--win-rate", "0.3", "--trials", "300"]) == 0
+        out = capsys.readouterr().out
+        assert "RECOMMENDED RISK" in out
+        assert "Breakeven" in out
+
+    def test_losing_edge_is_reported(self, capsys):
+        assert main(["risk", "--win-rate", "0.1", "--trials", "300"]) == 0
+        assert "loses money" in capsys.readouterr().out
+
+    def test_from_backtest(self, sample_csv, capsys):
+        """Sizing from measured trades has three legitimate outcomes.
+
+        It can recommend a size; it can refuse because the backtest produced no
+        trades; or it can report a losing edge — which is the expected result on
+        a small sample, because sizing uses the *lower bound* of the win-rate
+        interval and that bound often sits below breakeven. All three are the
+        system working, so the test accepts any of them and only rejects a
+        crash or an empty report.
+        """
+        code = main(["risk", "--from-backtest", "--csv", str(sample_csv), "--trials", "300"])
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert code in (0, 2)
+        assert (
+            "RECOMMENDED RISK" in combined
+            or "no trades" in combined
+            or "loses money" in combined
+        ), combined[-300:]
+
+
+class TestJournalCommands:
+    def _config(self, tmp_path):
+        path = tmp_path / "c.toml"
+        path.write_text(f'journal_path = "{tmp_path / "j.jsonl"}"\n')
+        return str(path)
+
+    def test_open_list_is_empty(self, tmp_path, capsys):
+        assert main(["--config", self._config(tmp_path), "journal", "--open"]) == 0
+        assert "No open signals" in capsys.readouterr().out
+
+    def test_close_round_trip(self, tmp_path, capsys):
+        import sys as _sys
+        _sys.path.insert(0, str(REPO / "tests"))
+        from trading_bot.journal import Journal
+        from test_backtest import make_signal
+
+        config = self._config(tmp_path)
+        entry = Journal(tmp_path / "j.jsonl").record(make_signal())
+
+        assert main(["--config", config, "journal", "--open"]) == 0
+        assert entry.entry_id in capsys.readouterr().out
+
+        code = main(["--config", config, "journal",
+                     "--close", entry.entry_id, "--exit", "1.1085"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "win" in out and "+4.25R" in out
+
+        assert main(["--config", config, "journal"]) == 0
+        assert "LIVE PERFORMANCE" in capsys.readouterr().out
+
+    def test_close_without_exit_price_is_rejected(self, tmp_path, capsys):
+        code = main(["--config", self._config(tmp_path), "journal", "--close", "X@Y"])
+        assert code == 2
+        assert "needs --exit" in capsys.readouterr().err
+
+
+class TestServeCommand:
+    def test_serve_is_registered(self):
+        args = build_parser().parse_args(["serve", "--port", "9999"])
+        assert args.port == 9999
+        assert args.host == "127.0.0.1", "serve must default to loopback"
+
+    def test_serve_accepts_a_token(self):
+        args = build_parser().parse_args(["serve", "--token", "abc"])
+        assert args.token == "abc"
+
+
 class TestShippedConfig:
     @pytest.mark.skipif(not CONFIG.exists(), reason="repo config not present")
     def test_scan_runs_with_the_shipped_config(self, capsys):

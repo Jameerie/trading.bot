@@ -19,10 +19,13 @@ from .data.synthetic import SyntheticSource, generate
 from .errors import TradingBotError
 from .instruments import get_instrument
 from .journal import Journal
+from .metrics import compute_metrics
 from .models import Timeframe
 from .report import format_comparison, format_result, format_trades
+from .risk_analysis import analyse, analyse_from_metrics, format_report
 from .scanner import scan_latest
 from .signals import format_signal, format_signal_compact, no_signal_message
+from .web.server import TOKEN_ENV
 
 BANNER = "trading.bot - forex advisor. It tells you what to do; you place the trade."
 
@@ -120,9 +123,65 @@ def cmd_calibrate(args, config: Config) -> int:
 
 
 def cmd_journal(args, config: Config) -> int:
-    """Show what has been advised."""
+    """Show what has been advised, or record how a trade finished."""
     journal = Journal(args.path or config.journal_path)
+
+    if args.close:
+        if args.exit is None:
+            print("error: --close needs --exit <price>", file=sys.stderr)
+            return 2
+        entry = journal.close(args.close, args.exit, note=args.note or "")
+        print(f"closed {entry.entry_id}")
+        print(f"  exit      {entry.exit_price}")
+        print(f"  outcome   {entry.outcome}")
+        print(f"  result    {entry.r_multiple:+.2f}R")
+        return 0
+
+    if args.open:
+        entries = journal.open_entries()
+        if not entries:
+            print("No open signals.")
+            return 0
+        print(f"{len(entries)} open signal(s):\n")
+        for entry in entries:
+            sig = entry.signal
+            print(f"  {entry.entry_id}")
+            print(f"    {sig.get('direction')} {sig.get('symbol')} "
+                  f"entry {sig.get('entry')} sl {sig.get('stop_loss')} tp {sig.get('take_profit')}")
+        print("\nClose one with: trading-bot journal --close <id> --exit <price>")
+        return 0
+
     print(journal.summary())
+    return 0
+
+
+def cmd_risk(args, config: Config) -> int:
+    """Show how much to risk per trade, and what it costs to be wrong."""
+    print(BANNER)
+    if args.from_backtest:
+        candles = _load_candles(args, config)
+        symbol = args.symbol or config.data.symbols[0]
+        result = run_backtest(candles, symbol, config)
+        metrics = compute_metrics(result.trades, config.target.confidence)
+        if metrics.is_empty:
+            print(f"error: the backtest on {symbol} produced no trades to size from",
+                  file=sys.stderr)
+            return 2
+        report = analyse_from_metrics(
+            metrics, config.risk.min_risk_reward, args.trades, args.trials,
+            config.target.confidence
+        )
+    else:
+        report = analyse(args.win_rate, config.risk.min_risk_reward, args.trades, args.trials)
+    print(format_report(report, config.account.balance, config.account.currency))
+    return 0
+
+
+def cmd_serve(args, config: Config) -> int:
+    """Run the web UI, reachable from a browser on any device."""
+    from .web.server import serve
+
+    serve(config, host=args.host, port=args.port, token=args.token, open_browser=args.open)
     return 0
 
 
@@ -206,10 +265,36 @@ def build_parser() -> argparse.ArgumentParser:
                      help="measure each threshold out-of-sample (default 0.7); 0 for full series")
     cal.set_defaults(func=cmd_calibrate)
 
-    jour = sub.add_parser("journal", help="show journalled signals")
+    jour = sub.add_parser("journal", help="show journalled signals, or close one")
     jour.add_argument("--path", help="journal file")
     jour.add_argument("--list", action="store_true", help="list entries (default)")
+    jour.add_argument("--open", action="store_true", help="list only signals still open")
+    jour.add_argument("--close", metavar="ID", help="record the outcome of a signal")
+    jour.add_argument("--exit", type=float, metavar="PRICE", help="price you actually exited at")
+    jour.add_argument("--note", help="optional note to store with the outcome")
     jour.set_defaults(func=cmd_journal)
+
+    risk = sub.add_parser("risk", help="how much to risk per trade")
+    risk.add_argument("--win-rate", type=float, default=0.30, dest="win_rate",
+                      help="win rate as a fraction (default 0.30)")
+    risk.add_argument("--from-backtest", action="store_true", dest="from_backtest",
+                      help="measure the win rate from a backtest instead of assuming one")
+    risk.add_argument("--trades", type=int, default=60, help="trades per period (default 60)")
+    risk.add_argument("--trials", type=int, default=5000, help="Monte Carlo trials")
+    risk.add_argument("--csv")
+    risk.add_argument("--symbol")
+    risk.add_argument("--timeframe")
+    risk.add_argument("--source", choices=["csv", "rest", "synthetic"])
+    risk.add_argument("--bars", type=int)
+    risk.set_defaults(func=cmd_risk)
+
+    web = sub.add_parser("serve", help="run the web UI (open it from any device)")
+    web.add_argument("--host", default="127.0.0.1",
+                     help="0.0.0.0 to allow other devices on your network (default 127.0.0.1)")
+    web.add_argument("--port", type=int, default=8787)
+    web.add_argument("--token", help=f"access token; also read from ${TOKEN_ENV}")
+    web.add_argument("--open", action="store_true", help="open a browser on start")
+    web.set_defaults(func=cmd_serve)
 
     data = sub.add_parser("data", help="create or inspect candle files")
     data.add_argument("--generate", action="store_true", help="write synthetic sample CSVs")

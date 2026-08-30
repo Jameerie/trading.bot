@@ -45,29 +45,53 @@ No installation and no dependencies — Python 3.11 or newer is all you need.
 ```bash
 git clone https://github.com/Jameerie/trading.bot
 cd trading.bot
-
-make demo                      # scan, backtest and calibrate on bundled data
-make test                      # 272 tests
-
 export PYTHONPATH=src
-python -m trading_bot --config config/default.toml scan
+
+python -m trading_bot --config config/default.toml serve --open
+```
+
+That opens the web app. It is responsive, installs to a phone home screen, and
+works over your network or a tunnel — see **[SETUP.md](SETUP.md)**.
+
+```bash
+make demo    # scan, backtest and calibrate on the bundled data
+make test    # 390 tests, offline, ~25 seconds
 ```
 
 ### Commands
 
 | Command | What it does |
 |---|---|
+| `serve` | Runs the web UI. Reachable from any device. |
 | `scan` | Looks at the latest closed bar and says what to do. **This is the product.** |
 | `backtest` | Measures the strategy on history. `--split 0.7` reports out-of-sample separately. |
 | `calibrate` | Sweeps the selectivity threshold and shows the win-rate / trade-count trade-off. |
-| `journal` | Lists every signal that has been issued. |
+| `risk` | How much to risk per trade, and what it costs to be wrong. |
+| `journal` | Lists issued signals, and records how they actually finished. |
 | `data` | Generates sample CSVs or inspects one. |
 
 ```bash
+python -m trading_bot serve --host 0.0.0.0            # reach it from your phone
 python -m trading_bot scan --symbols EURUSD GBPUSD --compact
 python -m trading_bot backtest --csv data/samples/EURUSD_H1.csv --split 0.7 --trades
-python -m trading_bot calibrate --csv data/samples/EURUSD_H1.csv
+python -m trading_bot risk --from-backtest --csv data/samples/EURUSD_H1.csv
+python -m trading_bot journal --close "EURUSD@2024-05-01T14:00:00+00:00" --exit 1.0865
 ```
+
+## The app
+
+Five views, all working from the same engine the CLI uses:
+
+- **Scan** — signal cards with a price chart, entry/stop/target, lot size and the
+  full reasoning. Or a "no setup" card showing how close it came.
+- **Backtest** — metrics, equity curve, and the in-sample vs out-of-sample gap.
+- **Calibrate** — the selectivity sweep as a table.
+- **Sizing** — Kelly, the recommended risk, and the drawdown each level costs.
+- **Journal** — what you were advised, and what actually happened.
+
+It is an installable PWA: the shell works offline, but scans deliberately do not.
+A cached signal priced against a market that has since moved is a wrong answer,
+not a degraded one.
 
 ## About the 85% win rate
 
@@ -89,6 +113,21 @@ So the system is built to be honest about it rather than flattering:
 
 A 1:4 system does not need a high win rate to make money — it is profitable above
 about 20% — and the reports show expectancy alongside the win rate for that reason.
+
+## Closing the loop
+
+A signal generator that never learns from its own advice is a slot machine with
+opinions. Every signal is journalled when issued, and you record how it finished:
+
+```bash
+python -m trading_bot journal --close "EURUSD@2024-05-01T14:00:00+00:00" --exit 1.0865
+```
+
+The journal is append-only JSONL — a close is a *new line* referencing the
+original signal, never an edit of it — so the history is tamper-evident. The
+**Live performance** panel then measures your real trades in the same units as
+the backtest, with the same confidence-interval treatment, so you can see whether
+the simulation is telling the truth.
 
 ## How the strategy works
 
@@ -166,18 +205,26 @@ src/trading_bot/
   risk.py         signals.py       scanner.py       precompute.py
   backtest.py     metrics.py       calibrate.py     report.py
   config.py       instruments.py   sessions.py      journal.py
-  strategy/       data/            cli.py
-tests/            272 tests, no network, deterministic
+  risk_analysis.py
+  strategy/       data/            web/             cli.py
+tests/            390 tests, no network, deterministic
 config/           default.toml
 data/samples/     synthetic OHLCV
+deploy/           systemd unit
 ```
 
-`CLAUDE.md` documents the architecture and the working rules for this repository.
+| Document | What it covers |
+|---|---|
+| [SETUP.md](SETUP.md) | Install, phone access, Docker, VPS, real data, troubleshooting |
+| [TESTING.md](TESTING.md) | How testing is conducted, layer by layer |
+| [CLAUDE.md](CLAUDE.md) | Architecture and the rules that keep results honest |
 
 ## Limitations
 
 - Single-position, single-timeframe, one instrument at a time. No portfolio-level
   correlation handling.
+- The web app is single-user and holds no accounts. Set `TRADING_BOT_TOKEN`
+  before exposing it beyond localhost.
 - Pip value for crosses that share no currency with the account is approximated, and
   signals say so.
 - The REST source covers Twelve Data only; adding a provider means one class.

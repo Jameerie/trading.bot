@@ -40,3 +40,22 @@ jobs:
           python -m trading_bot --config config/default.toml scan --no-journal
           python -m trading_bot --config config/default.toml backtest --csv data/samples/EURUSD_H1.csv --split 0.7
           python -m trading_bot --config config/default.toml calibrate --csv data/samples/EURUSD_H1.csv
+          python -m trading_bot risk --win-rate 0.3 --trials 500
+
+      - name: Web server starts and serves the app
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m trading_bot --config config/default.toml serve --port 8787 &
+          SERVER_PID=$!
+          # Poll rather than sleeping a fixed time, so a slow runner does not
+          # produce a flaky failure.
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/api/health > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8787/api/health | grep -q '"status": "ok"'
+          curl -fsS http://127.0.0.1:8787/ | grep -q "trading.bot"
+          curl -fsS http://127.0.0.1:8787/app.js > /dev/null
+          curl -fsS http://127.0.0.1:8787/manifest.webmanifest > /dev/null
+          kill $SERVER_PID
