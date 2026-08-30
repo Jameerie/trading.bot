@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-bot"
+version = "1.0.0"
+description = "Forex trading advisor: finds setups paying 1:4 or better and tells you what to do"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["forex", "trading", "signals", "backtesting", "risk-management"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+# The core package deliberately has no runtime dependencies. It must be usable
+# on any machine with Python 3.11 and no install step. Keep this list empty.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+trading-bot = "trading_bot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# Both paths are added so `pytest` works with no PYTHONPATH set: `src` for the
+# package, `tests` so the shared fixtures in conftest are importable by name.
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
+addopts = "-q"

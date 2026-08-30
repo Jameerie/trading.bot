@@ -1,0 +1,261 @@
+"""Performance measurement.
+
+The headline number this project cares about is win rate, which makes it the
+number most in need of honest handling. Three things are done here that a naive
+report would skip:
+
+1. **Every win rate comes with a Wilson score interval.** Six wins from seven
+   trades is 85.7%, and it is also entirely consistent with a coin-flip strategy.
+   The interval says so.
+2. **The quality gate tests the interval's lower bound, not the point estimate.**
+   A strategy "meets the target" only when the evidence rules out its being
+   worse — not when a small lucky sample happens to land above the line.
+3. **Expired trades count.** A trade closed by the time limit is a real outcome
+   with a real P&L. Excluding it because it is neither a clean win nor a clean
+   loss would flatter every metric here.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+from .models import Outcome, Trade
+
+
+@dataclass(frozen=True)
+class Interval:
+    """A confidence interval on a proportion."""
+
+    low: float
+    high: float
+    confidence: float
+
+    def __str__(self) -> str:
+        return f"{self.low:.1%}-{self.high:.1%} @ {self.confidence:.0%}"
+
+
+def wilson_interval(successes: int, total: int, confidence: float = 0.95) -> Interval:
+    """Wilson score interval for a binomial proportion.
+
+    Chosen over the textbook normal approximation because it stays sane for the
+    small samples and extreme proportions this tool routinely produces — a
+    strategy with 8 trades and 7 wins breaks the normal approximation entirely.
+    """
+    if total <= 0:
+        return Interval(0.0, 1.0, confidence)
+    if not 0.5 <= confidence < 1:
+        raise ValueError(f"confidence must be in [0.5, 1), got {confidence}")
+
+    z = _z_for(confidence)
+    p = successes / total
+    denom = 1 + z * z / total
+    centre = (p + z * z / (2 * total)) / denom
+    margin = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total)) / denom
+    return Interval(max(0.0, centre - margin), min(1.0, centre + margin), confidence)
+
+
+def _z_for(confidence: float) -> float:
+    """Two-sided normal critical value, via the inverse error function."""
+    # math.erfinv does not exist; invert erf by bisection. Cheap and exact enough,
+    # and it keeps this module dependency-free.
+    target = confidence
+    lo, hi = 0.0, 10.0
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if math.erf(mid / math.sqrt(2)) < target:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+@dataclass(frozen=True)
+class Metrics:
+    """Everything worth knowing about a set of trades."""
+
+    trades: int
+    wins: int
+    losses: int
+    breakeven: int
+    expired: int
+    win_rate: float
+    win_rate_interval: Interval
+    expectancy_r: float
+    total_r: float
+    profit_factor: float
+    average_win_r: float
+    average_loss_r: float
+    max_drawdown_r: float
+    max_win_streak: int
+    max_loss_streak: int
+    average_bars_held: float
+    average_rr_planned: float
+    average_mae_r: float
+    average_mfe_r: float
+
+    @property
+    def is_empty(self) -> bool:
+        return self.trades == 0
+
+
+def compute_metrics(trades: list[Trade], confidence: float = 0.95) -> Metrics:
+    """Summarise a list of trades.
+
+    A trade counts as a win if it ended positive in R terms. That definition
+    deliberately includes an expired trade that closed in profit and excludes one
+    that closed in loss, rather than quietly dropping both.
+    """
+    if not trades:
+        return Metrics(
+            0, 0, 0, 0, 0, 0.0, Interval(0.0, 1.0, confidence), 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0, 0, 0.0, 0.0, 0.0, 0.0,
+        )
+
+    r_values = [t.r_multiple for t in trades]
+    wins = [t for t in trades if t.r_multiple > 1e-9]
+    losses = [t for t in trades if t.r_multiple < -1e-9]
+    breakeven = [t for t in trades if abs(t.r_multiple) <= 1e-9]
+    expired = [t for t in trades if t.outcome is Outcome.EXPIRED]
+
+    total_r = sum(r_values)
+    gross_win = sum(t.r_multiple for t in wins)
+    gross_loss = abs(sum(t.r_multiple for t in losses))
+
+    win_rate = len(wins) / len(trades)
+
+    return Metrics(
+        trades=len(trades),
+        wins=len(wins),
+        losses=len(losses),
+        breakeven=len(breakeven),
+        expired=len(expired),
+        win_rate=win_rate,
+        win_rate_interval=wilson_interval(len(wins), len(trades), confidence),
+        expectancy_r=total_r / len(trades),
+        total_r=total_r,
+        # An infinite profit factor is not informative; report it as the gross
+        # win instead so the caller can print a finite number.
+        profit_factor=(gross_win / gross_loss) if gross_loss > 0 else float(gross_win),
+        average_win_r=(gross_win / len(wins)) if wins else 0.0,
+        average_loss_r=(-gross_loss / len(losses)) if losses else 0.0,
+        max_drawdown_r=max_drawdown(r_values),
+        max_win_streak=longest_streak(trades, win=True),
+        max_loss_streak=longest_streak(trades, win=False),
+        average_bars_held=sum(t.bars_held for t in trades) / len(trades),
+        average_rr_planned=sum(t.signal.risk_reward for t in trades) / len(trades),
+        average_mae_r=sum(t.mae_r for t in trades) / len(trades),
+        average_mfe_r=sum(t.mfe_r for t in trades) / len(trades),
+    )
+
+
+def max_drawdown(r_values: list[float]) -> float:
+    """Largest peak-to-trough decline of the cumulative R curve.
+
+    Reported as a positive number of R. This is the number that decides whether a
+    strategy is survivable in practice: a 4R expectancy is no use if getting
+    there costs a 20R trough the account cannot sit through.
+    """
+    peak = 0.0
+    equity = 0.0
+    worst = 0.0
+    for r in r_values:
+        equity += r
+        peak = max(peak, equity)
+        worst = max(worst, peak - equity)
+    return worst
+
+
+def longest_streak(trades: list[Trade], win: bool) -> int:
+    """Longest consecutive run of winners or losers."""
+    best = current = 0
+    for trade in trades:
+        is_win = trade.r_multiple > 1e-9
+        if is_win == win:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+    return best
+
+
+def equity_curve(trades: list[Trade], starting: float = 0.0) -> list[float]:
+    """Cumulative R after each trade."""
+    curve, total = [], starting
+    for trade in trades:
+        total += trade.r_multiple
+        curve.append(round(total, 4))
+    return curve
+
+
+@dataclass(frozen=True)
+class QualityGate:
+    """Whether the measured performance clears the target, and why or why not."""
+
+    target_win_rate: float
+    min_sample: int
+    passed: bool
+    verdict: str
+    detail: str
+
+
+def evaluate_gate(
+    metrics: Metrics, target_win_rate: float, min_sample: int, confidence: float = 0.95
+) -> QualityGate:
+    """Judge a result against the target win rate.
+
+    The test is on the *lower bound* of the confidence interval. This is strict
+    on purpose: the alternative — passing whenever the point estimate clears the
+    line — would hand out a "meets target" badge to any strategy that got lucky
+    over ten trades, which is exactly the failure this project must not have.
+    """
+    if metrics.trades < min_sample:
+        return QualityGate(
+            target_win_rate=target_win_rate,
+            min_sample=min_sample,
+            passed=False,
+            verdict="INSUFFICIENT DATA",
+            detail=(
+                f"{metrics.trades} trade(s) is below the {min_sample}-trade minimum. "
+                f"No win rate is claimed from this sample. Test a longer history or "
+                f"lower strategy.min_confluence to take more setups."
+            ),
+        )
+
+    interval = metrics.win_rate_interval
+    if interval.low >= target_win_rate:
+        return QualityGate(
+            target_win_rate=target_win_rate,
+            min_sample=min_sample,
+            passed=True,
+            verdict="MEETS TARGET",
+            detail=(
+                f"win rate {metrics.win_rate:.1%} over {metrics.trades} trades; even the "
+                f"low end of the {interval.confidence:.0%} interval ({interval.low:.1%}) "
+                f"clears the {target_win_rate:.0%} target."
+            ),
+        )
+    if metrics.win_rate >= target_win_rate:
+        return QualityGate(
+            target_win_rate=target_win_rate,
+            min_sample=min_sample,
+            passed=False,
+            verdict="UNPROVEN",
+            detail=(
+                f"win rate {metrics.win_rate:.1%} is above the {target_win_rate:.0%} target, "
+                f"but the {interval.confidence:.0%} interval reaches down to {interval.low:.1%}. "
+                f"The sample is too small to rule out a much worse strategy. Needs more trades."
+            ),
+        )
+    return QualityGate(
+        target_win_rate=target_win_rate,
+        min_sample=min_sample,
+        passed=False,
+        verdict="BELOW TARGET",
+        detail=(
+            f"win rate {metrics.win_rate:.1%} over {metrics.trades} trades is below the "
+            f"{target_win_rate:.0%} target (interval {interval.low:.1%}-{interval.high:.1%}). "
+            f"Expectancy is {metrics.expectancy_r:+.2f}R per trade, so the strategy is "
+            f"{'still profitable' if metrics.expectancy_r > 0 else 'losing money'} at this win rate."
+        ),
+    )

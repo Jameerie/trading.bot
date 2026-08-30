@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Journals and generated reports are per-user run output, not source.
+reports/*.jsonl
+reports/*.txt
+
+# Never commit market data pulled from a provider, or credentials.
+data/live/
+.env

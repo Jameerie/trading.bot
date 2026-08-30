@@ -1,0 +1,71 @@
+# trading.bot configuration
+#
+# Every value here is validated at load time. Unknown keys are an error rather
+# than being ignored, so a typo surfaces immediately instead of silently leaving
+# you trading a setting you thought you had changed.
+
+journal_path = "reports/journal.jsonl"
+
+[account]
+balance = 10000.0
+currency = "USD"
+# Percentage of the balance risked if the stop is hit. Position size is derived
+# from this and the stop distance, never the other way round.
+risk_per_trade_pct = 1.0
+max_concurrent_risk_pct = 3.0
+
+[risk]
+# The product rule from the README. The loader refuses anything below 4.0 —
+# the floor is the point of the system, not a default to tune away.
+min_risk_reward = 4.0
+# A target further than this is unlikely to fill and would flatter the backtest.
+max_risk_reward = 20.0
+stop_atr_multiple = 1.5
+min_stop_pips = 8.0
+max_stop_pips = 60.0
+# How far beyond the invalidating swing the stop sits, in ATR. A stop resting
+# exactly on a visible swing is the one everybody else can see.
+structure_buffer_atr = 0.25
+
+[strategy]
+name = "trend_pullback"
+# The quality dial: the fraction of available confluence a setup must score.
+# Run `calibrate` on your own data before changing this.
+min_confluence = 0.70
+ema_fast = 21
+ema_slow = 50
+ema_trend = 200
+atr_period = 14
+rsi_period = 14
+adx_period = 14
+adx_min = 20.0
+swing_left = 2
+swing_right = 2
+max_pullback_bars = 12
+sessions = ["london", "newyork"]
+avoid_weekend = true
+
+[backtest]
+# Leave spread_pips unset to use each instrument's typical spread.
+commission_per_lot = 7.0
+slippage_pips = 0.2
+max_bars_in_trade = 200
+entry_expiry_bars = 3
+
+[data]
+source = "csv"
+symbols = ["EURUSD", "GBPUSD", "USDJPY"]
+timeframe = "H1"
+htf_timeframe = "H4"
+csv_dir = "data/samples"
+provider = "twelvedata"
+# The key is read from this environment variable. Never put a key in this file.
+api_key_env = "TRADING_BOT_API_KEY"
+lookback_bars = 500
+
+[target]
+# The README's aspiration. Measured, never assumed: the gate passes only when
+# the lower bound of the confidence interval clears this line.
+win_rate = 0.85
+min_sample = 30
+confidence = 0.95
