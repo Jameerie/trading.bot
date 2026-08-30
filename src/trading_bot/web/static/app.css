@@ -350,6 +350,28 @@ tr[data-hl="1"] td { background: var(--accent-soft); }
 .verdict__tag[data-v="UNPROVEN"]          { background: var(--warn-soft);  color: var(--warn); }
 .verdict__tag[data-v="BELOW TARGET"]      { background: var(--short-soft); color: var(--short); }
 .verdict__tag[data-v="INSUFFICIENT DATA"] { background: var(--surface-2);  color: var(--text-dim); }
+.verdict__tag[data-v="EDGE CONFIRMED"]    { background: var(--long-soft);  color: var(--long); }
+.verdict__tag[data-v="NO EDGE"]           { background: var(--short-soft); color: var(--short); }
+.verdict__tag[data-v="NO DATA"]           { background: var(--surface-2);  color: var(--text-dim); }
+
+/* Account-level limit warning. Loud, because it is the one message here that
+   says stop rather than describing a setup - but it never hides the advice. */
+.limit {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--short);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background: var(--short-soft);
+  color: var(--short);
+  font-weight: 600;
+  line-height: 1.45;
+}
+.limit__body { font-weight: 500; color: var(--text); }
+.limit__body strong { color: var(--short); }
 .verdict__txt { font-size: 12.5px; color: var(--text-dim); }
 
 /* ------------------------------------------------------------ equity line */

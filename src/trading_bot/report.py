@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .backtest import BacktestResult
 from .config import Config
-from .metrics import Metrics, QualityGate, compute_metrics, equity_curve, evaluate_gate
+from .metrics import Metrics, QualityGate, compute_metrics, equity_curve, evaluate_gate, measure_edge
 
 
 def _profit_factor(metrics: Metrics) -> str:
@@ -23,6 +23,7 @@ def format_result(result: BacktestResult, config: Config, width: int = 78) -> st
     gate = evaluate_gate(
         metrics, config.target.win_rate, config.target.min_sample, config.target.confidence
     )
+    edge = measure_edge(metrics, config.target.min_sample)
     bar = "=" * width
 
     lines = [
@@ -56,6 +57,7 @@ def format_result(result: BacktestResult, config: Config, width: int = 78) -> st
         f"({metrics.wins}W / {metrics.losses}L / {metrics.breakeven}BE)",
         f"    {int(config.target.confidence * 100)}% interval     "
         f"{metrics.win_rate_interval.low:.1%} to {metrics.win_rate_interval.high:.1%}",
+        f"    Edge vs chance    {edge.edge * 100:+.1f}pt   (chance gives {edge.baseline:.1%} at {edge.risk_reward:.1f}:1)",
         f"    Expectancy        {metrics.expectancy_r:+.2f}R per trade",
         f"    Total             {metrics.total_r:+.1f}R",
         f"    Profit factor     {_profit_factor(metrics)}",
@@ -80,6 +82,10 @@ def format_result(result: BacktestResult, config: Config, width: int = 78) -> st
         f"  {gate.verdict}",
     ]
     for chunk in _wrap(gate.detail, width - 6):
+        lines.append(f"    {chunk}")
+
+    lines += ["", f"  EDGE OVER CHANCE: {edge.verdict}"]
+    for chunk in _wrap(edge.detail, width - 6):
         lines.append(f"    {chunk}")
 
     lines += ["", _cash_note(metrics, config), bar]

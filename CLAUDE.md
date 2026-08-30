@@ -33,6 +33,10 @@ outside what published forex research or any credible track record shows. Treat 
 Therefore this codebase is built so that the win rate is **measured honestly and reported with
 its uncertainty**, never asserted:
 
+- `metrics.py` reports **edge over chance** beside every win rate. A win rate means nothing
+  without the ratio that produced it — 45% at 1.5:1 is a *smaller* edge than 25% at 4:1 — so
+  every result is scored against the `1/(1+R)` a random walk would give at the ratio the
+  trades **actually achieved**, never the ratio that was planned.
 - `metrics.py` reports a **Wilson score confidence interval** alongside every win rate, so a
   7-for-8 sample cannot masquerade as 87.5% skill.
 - `QualityGate` marks a strategy `MEETS TARGET` only when the *lower bound* of the interval
@@ -73,12 +77,13 @@ src/trading_bot/
   risk.py          R:R floor enforcement, stop placement, position sizing
   signals.py       Signal construction and the human-readable "what to do" card
   backtest.py      Bar-by-bar simulation with intrabar SL/TP resolution
-  metrics.py       Win rate + Wilson CI, expectancy, profit factor, drawdown, streaks
+  metrics.py       Win rate + Wilson CI, expectancy, edge over chance, drawdown, streaks
   calibrate.py     Threshold sweep to find the selectivity that meets the target
   journal.py       Append-only JSONL record of every signal issued
   report.py        Markdown / terminal rendering
   risk_analysis.py Kelly, growth-optimal sizing, and the cost of a wrong estimate
   precompute.py    Causal series cache — the reason evaluation is linear, not quadratic
+  limits.py        Daily-loss and drawdown circuit breakers — warn, never act
   cli.py           Entry point: serve, scan, backtest, calibrate, risk, journal, data
   data/
     base.py        DataSource protocol
@@ -127,6 +132,13 @@ because every quantity involved is causal and every structural item is gated on 
 cached and uncached paths produce identical signals. If that test fails, the cache is wrong and the
 slice-based path in `build_context` is the source of truth — fix the cache, never the assertion.
 
+- **Never score a result against a ratio the trades did not reach.** `effective_ratio` takes the
+  harder of the planned and realised ratios on purpose. Scoring a 10:1 plan that pays 2:1 against a
+  10:1 baseline sets a 9% bar that almost anything clears, and manufactures an edge that is not
+  there. `tests/test_edge.py` pins this shut.
+- **The limits warn; they never act.** `limits.py` may add a line to the signal card. It may not
+  suppress a signal, resize a position, or gate a request — that would be the software deciding.
+
 **The web layer serves advice, not orders.** `web/` may read and journal; it must never gain a code
 path that places, modifies, or cancels a trade. Keep handlers in `api.py` as pure functions so they
 stay testable without a socket, and keep credentials out of every payload — `/api/settings` reports
@@ -140,7 +152,7 @@ than restating the signature. Match the surrounding file.
 ## 4. Commands
 
 ```bash
-make test            # pytest suite (390 tests)
+make test            # pytest suite (432 tests)
 make lint            # compile-check + import-clean check
 make demo            # end-to-end run on bundled sample data
 

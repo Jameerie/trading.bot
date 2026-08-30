@@ -162,6 +162,40 @@ class TargetConfig:
 
 
 @dataclass(frozen=True)
+class LimitsConfig:
+    """Account-level loss limits that pause advice after a bad run.
+
+    These are the rules a proprietary trading firm enforces on a funded account,
+    and they are worth keeping on your own money for the same reason: the danger
+    after a run of losses is rarely that the next setup is poor. It is that a
+    human who has just lost money takes setups they would otherwise skip.
+
+    Nothing here places, cancels, or resizes anything. A breach puts a warning on
+    the signal card and the human still decides — same as every other output of
+    this program.
+    """
+
+    enabled: bool = True
+    daily_loss_pct: float = 3.0
+    max_drawdown_pct: float = 10.0
+
+    def validate(self) -> None:
+        if not 0 < self.daily_loss_pct <= 100:
+            raise ConfigError(
+                f"limits.daily_loss_pct must be in (0, 100], got {self.daily_loss_pct}"
+            )
+        if not 0 < self.max_drawdown_pct <= 100:
+            raise ConfigError(
+                f"limits.max_drawdown_pct must be in (0, 100], got {self.max_drawdown_pct}"
+            )
+        if self.max_drawdown_pct < self.daily_loss_pct:
+            raise ConfigError(
+                "limits.max_drawdown_pct cannot be below daily_loss_pct: a single day "
+                "would then be allowed to breach the account-wide limit"
+            )
+
+
+@dataclass(frozen=True)
 class Config:
     """The whole configuration tree."""
 
@@ -171,6 +205,7 @@ class Config:
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     data: DataConfig = field(default_factory=DataConfig)
     target: TargetConfig = field(default_factory=TargetConfig)
+    limits: LimitsConfig = field(default_factory=LimitsConfig)
     journal_path: str = "reports/journal.jsonl"
 
     def validate(self) -> "Config":
@@ -180,6 +215,7 @@ class Config:
         self.backtest.validate()
         self.data.validate()
         self.target.validate()
+        self.limits.validate()
         return self
 
 
@@ -216,7 +252,8 @@ def load_config(path: str | Path | None = None) -> Config:
         raise ConfigError(f"{p} is not valid TOML: {exc}") from exc
 
     top_unknown = set(raw) - {
-        "account", "risk", "strategy", "backtest", "data", "target", "journal_path"
+        "account", "risk", "strategy", "backtest", "data", "target", "limits",
+        "journal_path",
     }
     if top_unknown:
         raise ConfigError(f"unknown top-level section(s): {', '.join(sorted(top_unknown))}")
@@ -228,5 +265,6 @@ def load_config(path: str | Path | None = None) -> Config:
         backtest=_build(raw.get("backtest", {}), BacktestConfig, "backtest"),
         data=_build(raw.get("data", {}), DataConfig, "data"),
         target=_build(raw.get("target", {}), TargetConfig, "target"),
+        limits=_build(raw.get("limits", {}), LimitsConfig, "limits"),
         journal_path=raw.get("journal_path", "reports/journal.jsonl"),
     ).validate()

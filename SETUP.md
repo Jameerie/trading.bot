@@ -222,12 +222,34 @@ min_risk_reward = 4.0        # cannot be lowered - the loader refuses
 min_confluence = 0.70        # the quality dial; run `calibrate` before changing
 sessions = ["london", "newyork"]
 
+[limits]
+daily_loss_pct = 3.0         # warn once today's journalled losses reach this
+max_drawdown_pct = 10.0      # warn once peak-to-trough reaches this
+
 [data]
 source = "csv"
 symbols = ["EURUSD", "GBPUSD", "USDJPY"]
 ```
 
 Copy it to make your own, then pass `--config my.toml`.
+
+### About `[limits]`
+
+These are the two numbers a prop firm would enforce on a funded account, and
+they are worth keeping on your own money. When either is reached, a warning
+appears above your signals on the Scan view and in the terminal.
+
+It is a warning and nothing more. Nothing in this program can stop you trading,
+and the limits do not try to — the advice still prints, and you still decide.
+
+Two things to know about how they are measured:
+
+- **Only journalled trades count.** A trade you took without recording it is
+  invisible, so these numbers are a floor on your real losses, never a ceiling.
+  Close your trades in the Journal view and the limits stay honest.
+- **Losses are counted in R, scaled by `risk_per_trade_pct`.** Three full losses
+  at 1% a trade reads as 3%. If you actually risked more on a trade than the
+  config says, your real drawdown is worse than what is shown.
 
 ---
 

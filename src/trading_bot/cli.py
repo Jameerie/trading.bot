@@ -19,6 +19,7 @@ from .data.synthetic import SyntheticSource, generate
 from .errors import TradingBotError
 from .instruments import get_instrument
 from .journal import Journal
+from .limits import evaluate_limits
 from .metrics import compute_metrics
 from .models import Timeframe
 from .report import format_comparison, format_result, format_trades
@@ -55,6 +56,11 @@ def cmd_scan(args, config: Config) -> int:
     print(f"Scanning {len(symbols)} symbol(s) on {timeframe.name}, "
           f"min confluence {config.strategy.min_confluence:.0%}, "
           f"min R:R {config.risk.min_risk_reward:.0f}:1\n")
+
+    status = evaluate_limits(Journal(config.journal_path).read(), config)
+    if status.breached:
+        print(status.banner())
+        print()
 
     found = 0
     for symbol in symbols:

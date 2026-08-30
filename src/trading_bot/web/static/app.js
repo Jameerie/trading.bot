@@ -270,6 +270,20 @@ function noSetupCard(row) {
 
 /* -------------------------------------------------------------- scan view */
 
+/* The one message in this app that says stop. It is rendered above the results
+   and never in place of them: the advice still shows, the human still decides. */
+function limitBanner(limits) {
+  if (!limits || !limits.breached) return '';
+  const rows = limits.breaches
+    .map((b) => `<strong>${esc(b.name)}</strong> ${b.actual_pct.toFixed(2)}% of ${b.limit_pct.toFixed(2)}% limit`)
+    .join(' &middot; ');
+  return `<div class="limit" role="alert">
+      <span aria-hidden="true">&#9888;</span>
+      <span class="limit__body">Risk limit reached &mdash; ${rows}.<br>
+        Advice below continues. The rules you set say stop for now.</span>
+    </div>`;
+}
+
 async function runScan() {
   const params = {
     symbols: $('#scan-symbols').value.trim(),
@@ -288,12 +302,13 @@ async function runScan() {
      <span>${esc(data.scanned_at.slice(11, 16))} UTC</span>`;
 
   const out = $('#scan-results');
+  const banner = limitBanner(data.limits);
   if (!data.results.length) {
     out.innerHTML = `<div class="empty"><div class="empty__big">Nothing scanned</div>
       <div class="empty__sub">Add a symbol above.</div></div>`;
     return;
   }
-  out.innerHTML = data.results.map((row) => {
+  out.innerHTML = banner + data.results.map((row) => {
     if (row.status === 'error') {
       return `<div class="err"><strong>${esc(row.symbol)}</strong> — ${esc(row.message)}</div>`;
     }
@@ -306,7 +321,7 @@ async function runScan() {
 /* ---------------------------------------------------------- backtest view */
 
 function metricsBlock(payload) {
-  const m = payload.metrics, g = payload.gate;
+  const m = payload.metrics, g = payload.gate, e = payload.edge;
   return `
     <article class="card">
       <div class="card__head">
@@ -338,6 +353,10 @@ function metricsBlock(payload) {
         <span class="verdict__tag" data-v="${esc(g.verdict)}">${esc(g.verdict)}</span>
         <span class="verdict__txt">${esc(g.detail)}</span>
       </div>
+      ${e ? `<div class="verdict">
+        <span class="verdict__tag" data-v="${esc(e.verdict)}">${esc(e.verdict)}</span>
+        <span class="verdict__txt">${esc(e.detail)}</span>
+      </div>` : ''}
     </article>`;
 }
 

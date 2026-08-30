@@ -63,6 +63,15 @@ provider = "twelvedata"
 api_key_env = "TRADING_BOT_API_KEY"
 lookback_bars = 500
 
+[limits]
+# Account-level circuit breakers, in percent of balance. These warn on the signal
+# card; nothing in this program can stop you trading, and nothing here tries to.
+# Losses are counted from the journal only, so a trade you never recorded is a
+# loss these limits cannot see.
+enabled = true
+daily_loss_pct = 3.0
+max_drawdown_pct = 10.0
+
 [target]
 # The README's aspiration. Measured, never assumed: the gate passes only when
 # the lower bound of the confidence interval clears this line.

@@ -22,7 +22,8 @@ from ..data.synthetic import SyntheticSource
 from ..errors import TradingBotError
 from ..instruments import REGISTRY, get_instrument
 from ..journal import Journal
-from ..metrics import compute_metrics, evaluate_gate
+from ..limits import evaluate_limits
+from ..metrics import compute_metrics, evaluate_gate, measure_edge
 from ..models import Candle, Signal, Timeframe
 from ..risk_analysis import analyse, analyse_from_metrics, format_report
 from ..scanner import scan_latest
@@ -237,7 +238,32 @@ def scan(params: dict, config: Config) -> dict:
         "min_confluence": config.strategy.min_confluence,
         "min_risk_reward": config.risk.min_risk_reward,
         "found": found,
+        "limits": _limits_payload(config, journal),
         "results": results,
+    }
+
+
+def _limits_payload(config: Config, journal: Journal) -> dict:
+    """Where the account stands against its loss limits.
+
+    Advisory only, like everything else here: the payload says a limit is
+    breached; it never withholds a signal or changes one.
+    """
+    status = evaluate_limits(journal.read(), config)
+    return {
+        "enabled": status.enabled,
+        "breached": status.breached,
+        "daily_loss_pct": status.daily_loss_pct,
+        "daily_limit_pct": status.daily_limit_pct,
+        "drawdown_pct": status.drawdown_pct,
+        "drawdown_limit_pct": status.drawdown_limit_pct,
+        "headroom_pct": round(status.headroom_pct(), 4),
+        "closed_trades": status.closed_trades,
+        "breaches": [
+            {"name": b.name, "limit_pct": b.limit_pct, "actual_pct": b.actual_pct}
+            for b in status.breaches
+        ],
+        "banner": status.banner(),
     }
 
 
@@ -247,6 +273,7 @@ def _result_payload(result, config: Config) -> dict:
     gate = evaluate_gate(
         metrics, config.target.win_rate, config.target.min_sample, config.target.confidence
     )
+    edge = measure_edge(metrics, config.target.min_sample)
     interval = metrics.win_rate_interval
     equity, running = [], 0.0
     for trade in result.trades:
@@ -278,6 +305,15 @@ def _result_payload(result, config: Config) -> dict:
             "average_bars_held": metrics.average_bars_held,
         },
         "gate": {"verdict": gate.verdict, "passed": gate.passed, "detail": gate.detail},
+        "edge": {
+            "verdict": edge.verdict,
+            "proven": edge.proven,
+            "baseline": edge.baseline,
+            "risk_reward": edge.risk_reward,
+            "edge": edge.edge,
+            "lower_bound_edge": edge.lower_bound_edge,
+            "detail": edge.detail,
+        },
         "equity_curve": equity,
         "trades": [t.to_dict() for t in result.trades],
     }
@@ -436,6 +472,7 @@ def journal_list(params: dict, config: Config) -> dict:
             }
             for entry in reversed(entries[-200:])
         ],
+        "limits": _limits_payload(config, journal),
         "live": {
             "trades": metrics.trades,
             "win_rate": metrics.win_rate,

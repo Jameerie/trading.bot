@@ -259,3 +259,138 @@ def evaluate_gate(
             f"{'still profitable' if metrics.expectancy_r > 0 else 'losing money'} at this win rate."
         ),
     )
+
+
+# ----------------------------------------------------------------------- edge
+
+
+def random_baseline(risk_reward: float) -> float:
+    """The win rate luck alone produces at this reward-to-risk ratio.
+
+    A driftless random walk placed between two barriers touches each one with
+    probability proportional to the *other* one's distance, so a target set ``R``
+    times further away than the stop is reached first only ``1 / (1 + R)`` of the
+    time. At our 1:4 floor that is 20%. At 1:1.5 it is 40%.
+
+    This is the number a strategy must beat to have demonstrated anything at all,
+    and it is why a bare win rate cannot be compared across systems: 45% at 1.5:1
+    is a *smaller* edge than 25% at 4:1, though the first looks nearly twice as
+    good. Quoting a win rate without its ratio is the most common way a track
+    record misleads, including by accident.
+    """
+    if risk_reward <= 0:
+        raise ValueError(f"risk_reward must be positive, got {risk_reward}")
+    return 1.0 / (1.0 + risk_reward)
+
+
+@dataclass(frozen=True)
+class Edge:
+    """How far a measured win rate sits above what chance would have given."""
+
+    risk_reward: float
+    baseline: float
+    win_rate: float
+    edge: float
+    lower_bound_edge: float
+    proven: bool
+    verdict: str
+    detail: str
+
+
+def effective_ratio(metrics: Metrics) -> float:
+    """The reward-to-risk ratio to hold a result to.
+
+    A planned 6.6:1 that in practice pays 4.4:1 — because trades keep closing on
+    the time limit instead of at the target — must not be scored against a 6.6:1
+    baseline. The planned ratio sets a *lower* bar (chance clears a distant target
+    less often), so using it where trades never reach that target inflates the
+    apparent edge. That is the exact direction of error this project exists to
+    avoid, so the harder of the two bars is always used.
+    """
+    planned = metrics.average_rr_planned
+    if metrics.wins == 0 or metrics.losses == 0 or metrics.average_loss_r == 0:
+        return planned
+    realised = metrics.average_win_r / abs(metrics.average_loss_r)
+    return min(planned, realised) if realised > 0 else planned
+
+
+def measure_edge(metrics: Metrics, min_sample: int = 30) -> Edge:
+    """Compare a result against its own random-walk baseline.
+
+    Like :func:`evaluate_gate`, this refuses to reach a verdict on a small sample
+    and decides on the *lower bound* of the win-rate interval rather than the
+    point estimate. A strategy has shown an edge only when the evidence rules out
+    chance having produced the result.
+
+    The ratio used is :func:`effective_ratio`, not the planned one, so a strategy
+    is never credited for a target it did not actually reach.
+
+    One approximation remains, and it errs in the safe direction: the baseline
+    ignores spread and commission, which push a real random walk *below*
+    ``1 / (1 + R)``. The true bar is therefore slightly lower than the one applied
+    here, so this measure understates the edge rather than flattering it.
+    """
+    if metrics.is_empty:
+        return Edge(0.0, 0.0, 0.0, 0.0, 0.0, False, "NO DATA", "No trades to measure.")
+
+    rr = effective_ratio(metrics)
+    if rr <= 0:
+        return Edge(
+            rr, 0.0, metrics.win_rate, 0.0, 0.0, False, "NO DATA",
+            "Reward-to-risk is not positive; no baseline can be formed.",
+        )
+
+    baseline = random_baseline(rr)
+    interval = metrics.win_rate_interval
+    edge = metrics.win_rate - baseline
+    lower = interval.low - baseline
+    against = (
+        f"{metrics.win_rate:.1%} against a {baseline:.1%} chance baseline at {rr:.1f}:1"
+    )
+
+    if metrics.trades < min_sample:
+        return Edge(
+            rr, baseline, metrics.win_rate, edge, lower, False, "INSUFFICIENT DATA",
+            f"{against} — {edge * 100:+.1f} points, but {metrics.trades} trade(s) is "
+            f"below the {min_sample}-trade minimum. No edge is claimed from this sample.",
+        )
+
+    expired_share = metrics.expired / metrics.trades
+    caveat = (
+        f" {metrics.expired} of {metrics.trades} trades closed on the time limit rather "
+        f"than at a barrier, which weakens this comparison."
+        if expired_share > 0.2
+        else ""
+    )
+
+    proven = lower > 0
+    if proven:
+        verdict = "EDGE CONFIRMED"
+        detail = (
+            f"{against} — {edge * 100:+.1f} points. Even the low end of the interval "
+            f"({interval.low:.1%}) clears chance, so the result is not luck.{caveat}"
+        )
+    elif edge > 0:
+        verdict = "UNPROVEN"
+        detail = (
+            f"{against} — {edge * 100:+.1f} points, but the interval reaches down to "
+            f"{interval.low:.1%}, below chance. A coin flip could have produced this. "
+            f"Needs more trades.{caveat}"
+        )
+    else:
+        verdict = "NO EDGE"
+        detail = (
+            f"{against} — {edge * 100:+.1f} points. The strategy is not beating a "
+            f"random walk at this ratio.{caveat}"
+        )
+
+    return Edge(
+        risk_reward=rr,
+        baseline=baseline,
+        win_rate=metrics.win_rate,
+        edge=edge,
+        lower_bound_edge=lower,
+        proven=proven,
+        verdict=verdict,
+        detail=detail,
+    )

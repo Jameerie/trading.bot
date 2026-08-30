@@ -1,6 +1,6 @@
 # How testing is conducted
 
-390 tests, no network, fully deterministic, ~25 seconds.
+432 tests, no network, fully deterministic, ~25 seconds.
 
 ```bash
 make test                              # everything
@@ -27,6 +27,7 @@ There are four such ways, and they map directly onto the test files:
 | Failure | What it does | Where it is pinned |
 |---|---|---|
 | **Look-ahead** | Uses data that did not exist yet, inflating everything | `test_structure.py`, `test_precompute.py` |
+| **Ratio flattery** | Scores a result against a target the trades never reached | `test_edge.py` |
 | **Optimistic fills** | Assumes the good outcome when the bar is ambiguous | `test_backtest.py` |
 | **Small-sample bravado** | Reports 7-from-8 as an 87% win rate | `test_metrics.py` |
 | **Sizing on a hoped edge** | Bets Kelly on a rate the sample cannot support | `test_risk_analysis.py` |
@@ -48,7 +49,9 @@ There are four such ways, and they map directly onto the test files:
 | `test_indicators.py` | 20 | EMA, SMA, RSI, ATR, ADX values and index alignment |
 | `test_backtest.py` | 18 | **Simulation realism** — fills, tie-breaking, gaps, overlap |
 | `test_precompute.py` | 7 | Cached and uncached evaluation produce identical signals |
-| **Total** | **390** | |
+| `test_edge.py` | 20 | Edge over chance; a planned ratio cannot manufacture one |
+| `test_limits.py` | 22 | Daily-loss and drawdown breakers; advisory, never blocking |
+| **Total** | **432** | |
 
 ---
 
@@ -147,7 +150,8 @@ asymmetrically, which is the argument for sizing off the interval's lower bound.
 
 ## Layer 6 — Optimisation equivalence
 
-`test_precompute.py` (7)
+`test_precompute.py` (7), `test_edge.py` (20),
+`test_limits.py` (22)
 
 The evaluation cache made the tool 91× faster. Speed is never a reason to change
 results, so these tests are its licence: for **every bar** of a 900-bar series,
