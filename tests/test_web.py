@@ -8,6 +8,7 @@ serving, path confinement and body limits.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -376,6 +377,16 @@ class TestAuth:
             with pytest.raises(urllib.error.HTTPError) as exc:
                 server.get("/")
             assert exc.value.code == 401
+
+    def test_the_suite_is_insulated_from_the_developers_shell(self):
+        """Pins the autouse fixture in conftest.
+
+        Without it, exporting TRADING_BOT_TOKEN — exactly what SETUP.md tells a
+        user to do — turns five tests in this file red for reasons that have
+        nothing to do with the code.
+        """
+        assert "TRADING_BOT_TOKEN" not in os.environ
+        assert "TRADING_BOT_API_KEY" not in os.environ
 
     def test_token_comes_from_the_environment(self, cfg, monkeypatch):
         monkeypatch.setenv("TRADING_BOT_TOKEN", "from-env")

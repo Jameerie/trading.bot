@@ -40,31 +40,37 @@ why. You place the trade. The software never does.
 
 ## Quick start
 
-Python 3.11 or newer is the only requirement. Run the setup once:
+One file does everything — it fetches the code, installs it, and opens the app:
 
 ```bash
-git clone https://github.com/Jameerie/trading.bot
-cd trading.bot
-./setup.sh
+curl -fsSL https://raw.githubusercontent.com/Jameerie/trading.bot/main/trading-bot.sh -o trading-bot.sh
+bash trading-bot.sh
 ```
 
-It finds your Python, builds an isolated environment, generates an access token,
-runs the test suite to prove the install works, and prints the URL to open. Then,
-whenever you want the app:
+Python 3.11+ and git are the only requirements, and it tells you how to get
+either if it is missing. Run the same command again any time to restart; add
+`--update` to pull the latest code first.
 
 ```bash
-./start.sh
+bash trading-bot.sh --scan          # just tell me what to do right now
+bash trading-bot.sh --port 9000     # serve somewhere else
+bash trading-bot.sh --local-only    # this machine only, no phone access
+bash trading-bot.sh --test          # run the 433 tests before starting
+bash trading-bot.sh --help          # everything else
 ```
 
-That serves the web app on your machine and on your local network, so the URL it
-prints second can be opened on your phone and added to the home screen as an app.
-For access from outside your network, see **[SETUP.md](SETUP.md)**.
+It serves on your local network too, so the second URL it prints opens on your
+phone and installs to the home screen as an app. For access from outside your
+network, see **[SETUP.md](SETUP.md)**.
 
-Re-running `./setup.sh` is safe — it reuses the environment and keeps your token.
+### Already cloned?
 
-### Without the setup script
+`./setup.sh` once, then `./start.sh` whenever you want it. Same result, and
+`make setup` / `make start` wrap both.
 
-The core has no dependencies, so it also runs straight from a checkout:
+### Neither?
+
+The core has no dependencies, so a checkout runs directly:
 
 ```bash
 export PYTHONPATH=src
@@ -73,7 +79,7 @@ python -m trading_bot --config config/default.toml scan
 
 ```bash
 make demo    # scan, backtest and calibrate on the bundled data
-make test    # 432 tests, offline, ~25 seconds
+make test    # 433 tests, offline, ~25 seconds
 ```
 
 ### Commands
@@ -225,7 +231,7 @@ src/trading_bot/
   config.py       instruments.py   sessions.py      journal.py
   risk_analysis.py                 limits.py
   strategy/       data/            web/             cli.py
-tests/            432 tests, no network, deterministic
+tests/            433 tests, no network, deterministic
 config/           default.toml
 data/samples/     synthetic OHLCV
 deploy/           systemd unit
