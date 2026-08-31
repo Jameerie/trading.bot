@@ -1,14 +1,22 @@
-.PHONY: help test lint demo scan clean
+.PHONY: help setup start test lint demo scan clean
 
 PY := python3
 export PYTHONPATH := src
 
 help:
+	@echo "make setup  - one-time setup: environment, token, verification"
+	@echo "make start  - run the web app (after setup)"
 	@echo "make test   - run the test suite"
 	@echo "make lint   - byte-compile everything and check the core imports cleanly"
 	@echo "make demo   - end-to-end run on the bundled sample data"
 	@echo "make scan   - show what to do right now"
 	@echo "make clean  - remove caches and generated reports"
+
+setup:
+	./setup.sh
+
+start:
+	./start.sh
 
 test:
 	$(PY) -m pytest tests/

@@ -40,22 +40,40 @@ why. You place the trade. The software never does.
 
 ## Quick start
 
-No installation and no dependencies — Python 3.11 or newer is all you need.
+Python 3.11 or newer is the only requirement. Run the setup once:
 
 ```bash
 git clone https://github.com/Jameerie/trading.bot
 cd trading.bot
-export PYTHONPATH=src
-
-python -m trading_bot --config config/default.toml serve --open
+./setup.sh
 ```
 
-That opens the web app. It is responsive, installs to a phone home screen, and
-works over your network or a tunnel — see **[SETUP.md](SETUP.md)**.
+It finds your Python, builds an isolated environment, generates an access token,
+runs the test suite to prove the install works, and prints the URL to open. Then,
+whenever you want the app:
+
+```bash
+./start.sh
+```
+
+That serves the web app on your machine and on your local network, so the URL it
+prints second can be opened on your phone and added to the home screen as an app.
+For access from outside your network, see **[SETUP.md](SETUP.md)**.
+
+Re-running `./setup.sh` is safe — it reuses the environment and keeps your token.
+
+### Without the setup script
+
+The core has no dependencies, so it also runs straight from a checkout:
+
+```bash
+export PYTHONPATH=src
+python -m trading_bot --config config/default.toml scan
+```
 
 ```bash
 make demo    # scan, backtest and calibrate on the bundled data
-make test    # 390 tests, offline, ~25 seconds
+make test    # 432 tests, offline, ~25 seconds
 ```
 
 ### Commands
@@ -205,12 +223,13 @@ src/trading_bot/
   risk.py         signals.py       scanner.py       precompute.py
   backtest.py     metrics.py       calibrate.py     report.py
   config.py       instruments.py   sessions.py      journal.py
-  risk_analysis.py
+  risk_analysis.py                 limits.py
   strategy/       data/            web/             cli.py
-tests/            390 tests, no network, deterministic
+tests/            432 tests, no network, deterministic
 config/           default.toml
 data/samples/     synthetic OHLCV
 deploy/           systemd unit
+setup.sh          one-time setup; start.sh runs the app
 ```
 
 | Document | What it covers |

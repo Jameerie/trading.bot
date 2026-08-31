@@ -12,17 +12,43 @@ third-party dependencies, so there is nothing to install and nothing to build.
 ```bash
 git clone https://github.com/Jameerie/trading.bot
 cd trading.bot
-export PYTHONPATH=src
+./setup.sh
+```
 
+That is the whole install. The script runs once and does five things:
+
+1. Finds a Python 3.11+ on your machine, and tells you how to get one if there
+   is none.
+2. Builds an isolated environment in `.venv/` so nothing touches your system
+   Python.
+3. Installs the app and the test suite.
+4. Generates a random access token into `.env` and creates `reports/` for your
+   journal. `.env` is gitignored and the token is never rotated on a re-run.
+5. Verifies the install by importing the package, running all 432 tests, and
+   performing a real scan — then prints the URL to open.
+
+Then start it whenever you want it:
+
+```bash
+./start.sh
+```
+
+It prints two URLs: one for this machine, one for other devices on your wifi.
+`make setup` and `make start` do the same thing if you prefer make.
+
+Re-running `./setup.sh` is safe. It reuses the environment and keeps your token.
+
+### If you would rather not run a script
+
+The core has no dependencies, so a checkout works directly:
+
+```bash
+export PYTHONPATH=src
 python3 -m trading_bot --config config/default.toml serve --open
 ```
 
-Your browser opens on `http://127.0.0.1:8787`. That is the whole install.
-
-Verify it works:
-
 ```bash
-make test     # 390 tests, offline, ~25 seconds
+make test     # 432 tests, offline, ~25 seconds
 make demo     # scan + backtest + calibrate on the bundled data
 ```
 
