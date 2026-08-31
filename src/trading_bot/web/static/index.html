@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Forex advisor: finds setups paying 1:4 or better and tells you what to do.">
+<meta name="theme-color" content="#0e1117" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="trading.bot">
+<title>trading.bot</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__brand">
+    <svg class="topbar__mark" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 17.5 9 11l4 4 8-8.5" fill="none" stroke="currentColor" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M16 6.5h5v5" fill="none" stroke="currentColor" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div>
+      <h1>trading.bot</h1>
+      <p class="topbar__tag">It tells you what to do. You place the trade.</p>
+    </div>
+  </div>
+  <div class="topbar__actions">
+    <span class="pill" id="status-pill" data-state="idle">connecting</span>
+    <button class="iconbtn" id="theme-toggle" type="button" aria-label="Switch theme" title="Switch theme">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9Z"
+        fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+    </button>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist" aria-label="Views">
+  <button class="tabs__btn is-active" data-view="scan" role="tab" aria-selected="true">Scan</button>
+  <button class="tabs__btn" data-view="backtest" role="tab" aria-selected="false">Backtest</button>
+  <button class="tabs__btn" data-view="calibrate" role="tab" aria-selected="false">Calibrate</button>
+  <button class="tabs__btn" data-view="risk" role="tab" aria-selected="false">Sizing</button>
+  <button class="tabs__btn" data-view="journal" role="tab" aria-selected="false">Journal</button>
+</nav>
+
+<main>
+
+  <!-- ================================================================ SCAN -->
+  <section class="view is-active" id="view-scan" role="tabpanel">
+    <div class="controls">
+      <label class="field field--grow">
+        <span>Symbols</span>
+        <input id="scan-symbols" type="text" placeholder="EURUSD, GBPUSD" autocomplete="off"
+               spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Timeframe</span>
+        <select id="scan-timeframe"></select>
+      </label>
+      <label class="field">
+        <span>Data</span>
+        <select id="scan-source">
+          <option value="">config default</option>
+          <option value="csv">csv</option>
+          <option value="synthetic">synthetic</option>
+          <option value="rest">live (rest)</option>
+        </select>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="scan-journal"><span>Journal signals</span>
+      </label>
+      <button class="btn btn--primary" id="scan-run" type="button">Scan</button>
+    </div>
+
+    <div class="summary" id="scan-summary" hidden></div>
+    <div id="scan-results" class="stack"></div>
+  </section>
+
+  <!-- ============================================================ BACKTEST -->
+  <section class="view" id="view-backtest" role="tabpanel">
+    <div class="controls">
+      <label class="field">
+        <span>Symbol</span>
+        <input id="bt-symbol" type="text" placeholder="EURUSD" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Timeframe</span>
+        <select id="bt-timeframe"></select>
+      </label>
+      <label class="field">
+        <span>Data</span>
+        <select id="bt-source">
+          <option value="">config default</option>
+          <option value="csv">csv</option>
+          <option value="synthetic">synthetic</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Bars</span>
+        <input id="bt-bars" type="number" value="3000" min="250" max="20000" step="250">
+      </label>
+      <label class="field">
+        <span>Split</span>
+        <select id="bt-split">
+          <option value="0.7">70% in / 30% out</option>
+          <option value="0.5">50 / 50</option>
+          <option value="0">no split</option>
+        </select>
+      </label>
+      <button class="btn btn--primary" id="bt-run" type="button">Run backtest</button>
+    </div>
+    <div id="bt-results" class="stack"></div>
+  </section>
+
+  <!-- =========================================================== CALIBRATE -->
+  <section class="view" id="view-calibrate" role="tabpanel">
+    <div class="controls">
+      <label class="field">
+        <span>Symbol</span>
+        <input id="cal-symbol" type="text" placeholder="EURUSD" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Data</span>
+        <select id="cal-source">
+          <option value="">config default</option>
+          <option value="csv">csv</option>
+          <option value="synthetic">synthetic</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Bars</span>
+        <input id="cal-bars" type="number" value="3000" min="250" max="20000" step="250">
+      </label>
+      <label class="check">
+        <input type="checkbox" id="cal-oos" checked><span>Out-of-sample only</span>
+      </label>
+      <button class="btn btn--primary" id="cal-run" type="button">Sweep</button>
+    </div>
+    <div id="cal-results" class="stack"></div>
+  </section>
+
+  <!-- ================================================================ RISK -->
+  <section class="view" id="view-risk" role="tabpanel">
+    <div class="controls">
+      <label class="field">
+        <span>Win rate source</span>
+        <select id="risk-mode">
+          <option value="assumed">Assume a win rate</option>
+          <option value="backtest">Measure from a backtest</option>
+        </select>
+      </label>
+      <label class="field" id="risk-rate-field">
+        <span>Win rate</span>
+        <input id="risk-rate" type="number" value="30" min="1" max="99" step="1">
+      </label>
+      <label class="field is-hidden" id="risk-symbol-field">
+        <span>Symbol</span>
+        <input id="risk-symbol" type="text" placeholder="EURUSD" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Trades / period</span>
+        <input id="risk-trades" type="number" value="60" min="5" max="2000" step="5">
+      </label>
+      <button class="btn btn--primary" id="risk-run" type="button">Analyse</button>
+    </div>
+    <div id="risk-results" class="stack"></div>
+  </section>
+
+  <!-- ============================================================= JOURNAL -->
+  <section class="view" id="view-journal" role="tabpanel">
+    <div class="controls">
+      <button class="btn" id="journal-refresh" type="button">Refresh</button>
+      <span class="controls__note">Signals are recorded when issued. Close them here to
+        measure what actually happened.</span>
+    </div>
+    <div id="journal-results" class="stack"></div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <p><strong>Not financial advice.</strong> Trading forex on leverage can lose more than your
+     deposit. This tool reports what it sees and what it would risk; every decision is yours.</p>
+  <p class="foot__meta" id="foot-meta"></p>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

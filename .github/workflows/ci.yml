@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependencies
+        # The package itself has no runtime dependencies; only pytest is needed.
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Check the core imports with no third-party packages
+        run: python -c "import sys; sys.path.insert(0, 'src'); import trading_bot; print(trading_bot.__version__)"
+
+      - name: Byte-compile
+        run: python -m compileall -q src tests
+
+      - name: Run tests
+        run: python -m pytest tests/
+
+      - name: End-to-end smoke test
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m trading_bot --config config/default.toml scan --no-journal
+          python -m trading_bot --config config/default.toml backtest --csv data/samples/EURUSD_H1.csv --split 0.7
+          python -m trading_bot --config config/default.toml calibrate --csv data/samples/EURUSD_H1.csv
+          python -m trading_bot risk --win-rate 0.3 --trials 500
+
+      - name: Web server starts and serves the app
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m trading_bot --config config/default.toml serve --port 8787 &
+          SERVER_PID=$!
+          # Poll rather than sleeping a fixed time, so a slow runner does not
+          # produce a flaky failure.
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/api/health > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8787/api/health | grep -q '"status": "ok"'
+          curl -fsS http://127.0.0.1:8787/ | grep -q "trading.bot"
+          curl -fsS http://127.0.0.1:8787/app.js > /dev/null
+          curl -fsS http://127.0.0.1:8787/manifest.webmanifest > /dev/null
+          kill $SERVER_PID

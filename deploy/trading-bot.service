@@ -1,0 +1,37 @@
+# systemd unit for running the advisor on a Linux box or VPS.
+#
+#   sudo cp deploy/trading-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now trading-bot
+#
+# Edit User, WorkingDirectory and the token before enabling.
+
+[Unit]
+Description=trading.bot forex advisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=advisor
+WorkingDirectory=/opt/trading.bot
+Environment=PYTHONPATH=/opt/trading.bot/src
+Environment=PYTHONUNBUFFERED=1
+# Required whenever the service listens on anything but loopback.
+Environment=TRADING_BOT_TOKEN=replace-with-a-generated-token
+ExecStart=/usr/bin/python3 -m trading_bot --config config/default.toml serve --host 127.0.0.1 --port 8787
+Restart=on-failure
+RestartSec=5
+
+# The service only needs to read its own directory and write its journal.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/trading.bot/reports
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
