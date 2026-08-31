@@ -63,6 +63,20 @@ It serves on your local network too, so the second URL it prints opens on your
 phone and installs to the home screen as an app. For access from outside your
 network, see **[SETUP.md](SETUP.md)**.
 
+### On Windows
+
+Download **[trading-bot.bat](trading-bot.bat)** and double-click it, or from a
+terminal:
+
+```
+trading-bot.bat
+```
+
+Same flags as above (`--scan`, `--port`, `--test`, `--help`). It needs Python
+3.11+ from [python.org](https://www.python.org/downloads/) — tick *"Add
+python.exe to PATH"* on the first install screen — and
+[git](https://git-scm.com/download/win). It tells you if either is missing.
+
 ### Already cloned?
 
 `./setup.sh` once, then `./start.sh` whenever you want it. Same result, and

@@ -179,10 +179,20 @@ ENVEOF
     ok "generated a fresh access token"
 fi
 
-set -a
-# shellcheck disable=SC1091
-. ./.env
-set +a
+# Read .env without sourcing it. A .env written by trading-bot.bat has CRLF
+# line endings, and sourcing that leaves a carriage return inside the value —
+# a correct token that gets refused with a 401, which is near impossible to
+# diagnose from the outside. Strip it here instead.
+load_env() {
+    [ -f .env ] || return 0
+    while IFS='=' read -r key value || [ -n "${key:-}" ]; do
+        case "$key" in
+            TRADING_BOT_TOKEN|TRADING_BOT_API_KEY)
+                export "$key=${value%$'\r'}" ;;
+        esac
+    done < .env
+}
+load_env
 
 # --------------------------------------------------------------- 5. Verify
 step "5/5  Checking it actually works"

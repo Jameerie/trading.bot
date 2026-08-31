@@ -36,6 +36,38 @@ bash trading-bot.sh --test          # run all 433 tests before starting
 bash trading-bot.sh --help          # the full list
 ```
 
+### On Windows
+
+Download **trading-bot.bat** from the repository and double-click it, or run it
+from Command Prompt or PowerShell:
+
+```
+trading-bot.bat
+```
+
+It does exactly what the shell script does, and takes the same flags:
+
+```
+trading-bot.bat --scan
+trading-bot.bat --port 9000
+trading-bot.bat --test
+trading-bot.bat --help
+```
+
+You need two things first, and the script names both if they are missing:
+
+- **Python 3.11+** from [python.org](https://www.python.org/downloads/). On the
+  first screen of the installer, tick **"Add python.exe to PATH"**. Without it
+  the script cannot find Python.
+- **git** from [git-scm.com](https://git-scm.com/download/win), used to fetch
+  the code. If you would rather not install it, download the repository ZIP,
+  unzip it, and run `trading-bot.bat` from inside the folder — it detects that
+  it is already in a checkout and skips the clone.
+
+If Windows SmartScreen warns about the file, that is because it is an unsigned
+script downloaded from the internet. Choose *More info* then *Run anyway*, or
+read the file first — it is plain text and about 350 lines.
+
 ### If you have already cloned the repo
 
 ```bash
