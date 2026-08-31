@@ -10,33 +10,73 @@ third-party dependencies, so there is nothing to install and nothing to build.
 ## 1. Fastest possible start
 
 ```bash
-git clone https://github.com/Jameerie/trading.bot
-cd trading.bot
-./setup.sh
+curl -fsSL https://raw.githubusercontent.com/Jameerie/trading.bot/main/trading-bot.sh -o trading-bot.sh
+bash trading-bot.sh
 ```
 
-That is the whole install. The script runs once and does five things:
+That is the whole install. One file, run once, and the app opens. It:
 
-1. Finds a Python 3.11+ on your machine, and tells you how to get one if there
-   is none.
-2. Builds an isolated environment in `.venv/` so nothing touches your system
-   Python.
-3. Installs the app and the test suite.
-4. Generates a random access token into `.env` and creates `reports/` for your
-   journal. `.env` is gitignored and the token is never rotated on a re-run.
-5. Verifies the install by importing the package, running all 432 tests, and
-   performing a real scan — then prints the URL to open.
+1. Finds a Python 3.11+, and tells you how to install one if there is none.
+2. Clones the repository into `~/trading.bot` (override with `--dir`).
+3. Builds an isolated environment in `.venv/` so nothing touches your system
+   Python, and installs the app.
+4. Generates a random access token into a gitignored `.env`, and creates
+   `reports/` for your journal. Re-running never rotates an existing token —
+   a phone you have already set up keeps working.
+5. Checks the install imports, then starts the server and opens your browser.
 
-Then start it whenever you want it:
+Run the same command again whenever you want it. Useful flags:
 
 ```bash
-./start.sh
+bash trading-bot.sh --scan          # print what to do right now, then exit
+bash trading-bot.sh --update        # pull the latest code first
+bash trading-bot.sh --port 9000     # serve on another port
+bash trading-bot.sh --local-only    # bind to this machine only
+bash trading-bot.sh --test          # run all 433 tests before starting
+bash trading-bot.sh --help          # the full list
 ```
 
-It prints two URLs: one for this machine, one for other devices on your wifi.
-`make setup` and `make start` do the same thing if you prefer make.
+### On Windows
 
-Re-running `./setup.sh` is safe. It reuses the environment and keeps your token.
+Download **trading-bot.bat** from the repository and double-click it, or run it
+from Command Prompt or PowerShell:
+
+```
+trading-bot.bat
+```
+
+It does exactly what the shell script does, and takes the same flags:
+
+```
+trading-bot.bat --scan
+trading-bot.bat --port 9000
+trading-bot.bat --test
+trading-bot.bat --help
+```
+
+You need two things first, and the script names both if they are missing:
+
+- **Python 3.11+** from [python.org](https://www.python.org/downloads/). On the
+  first screen of the installer, tick **"Add python.exe to PATH"**. Without it
+  the script cannot find Python.
+- **git** from [git-scm.com](https://git-scm.com/download/win), used to fetch
+  the code. If you would rather not install it, download the repository ZIP,
+  unzip it, and run `trading-bot.bat` from inside the folder — it detects that
+  it is already in a checkout and skips the clone.
+
+If Windows SmartScreen warns about the file, that is because it is an unsigned
+script downloaded from the internet. Choose *More info* then *Run anyway*, or
+read the file first — it is plain text and about 350 lines.
+
+### If you have already cloned the repo
+
+```bash
+./setup.sh      # once
+./start.sh      # whenever you want the app
+```
+
+`make setup` and `make start` do the same. `trading-bot.sh` also detects that
+you are standing in a checkout and uses it in place.
 
 ### If you would rather not run a script
 
@@ -48,7 +88,7 @@ python3 -m trading_bot --config config/default.toml serve --open
 ```
 
 ```bash
-make test     # 432 tests, offline, ~25 seconds
+make test     # 433 tests, offline, ~25 seconds
 make demo     # scan + backtest + calibrate on the bundled data
 ```
 

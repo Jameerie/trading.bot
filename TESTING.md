@@ -1,6 +1,6 @@
 # How testing is conducted
 
-432 tests, no network, fully deterministic, ~25 seconds.
+433 tests, no network, fully deterministic, ~25 seconds.
 
 ```bash
 make test                              # everything
@@ -36,7 +36,7 @@ There are four such ways, and they map directly onto the test files:
 
 | File | Tests | Covers |
 |---|--:|---|
-| `test_web.py` | 54 | API handlers, auth, path traversal, static serving, body limits |
+| `test_web.py` | 55 | API handlers, auth, path traversal, static serving, body limits |
 | `test_models_config.py` | 50 | Candle validation, instruments, config loading, sessions |
 | `test_data.py` | 40 | CSV parsing, vendor date formats, resampling, synthetic generator |
 | `test_signals_journal.py` | 37 | Signal construction, card rendering, confluence engine, scanning |
@@ -51,7 +51,7 @@ There are four such ways, and they map directly onto the test files:
 | `test_precompute.py` | 7 | Cached and uncached evaluation produce identical signals |
 | `test_edge.py` | 20 | Edge over chance; a planned ratio cannot manufacture one |
 | `test_limits.py` | 22 | Daily-loss and drawdown breakers; advisory, never blocking |
-| **Total** | **432** | |
+| **Total** | **433** | |
 
 ---
 

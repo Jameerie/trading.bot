@@ -16,13 +16,20 @@ if [ ! -x "$VPY" ]; then
     exit 1
 fi
 
-# Load the access token without echoing it into the shell history.
-if [ -f .env ]; then
-    set -a
-    # shellcheck disable=SC1091
-    . ./.env
-    set +a
-fi
+# Read .env without sourcing it. A .env written by trading-bot.bat has CRLF
+# line endings, and sourcing that leaves a carriage return inside the value —
+# a correct token that gets refused with a 401, which is near impossible to
+# diagnose from the outside. Strip it here instead.
+load_env() {
+    [ -f .env ] || return 0
+    while IFS='=' read -r key value || [ -n "${key:-}" ]; do
+        case "$key" in
+            TRADING_BOT_TOKEN|TRADING_BOT_API_KEY)
+                export "$key=${value%$'\r'}" ;;
+        esac
+    done < .env
+}
+load_env
 
 # 0.0.0.0 so a phone on the same wifi can reach it. The token is what keeps it
 # private; SETUP.md section 4 explains the trade-off before you expose it wider.

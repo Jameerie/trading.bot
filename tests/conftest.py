@@ -22,6 +22,23 @@ from trading_bot.models import Candle  # noqa: E402
 START = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_credentials(monkeypatch):
+    """Run every test as if the developer's shell held no credentials.
+
+    ``server.py`` deliberately falls back to ``TRADING_BOT_TOKEN`` when no token
+    is passed in, which is the right behaviour and is tested explicitly. The
+    catch is that anyone who has followed SETUP.md has that variable exported,
+    and five web tests then went red on their machine and nowhere else — the
+    worst kind of failure, because it looks like the code broke.
+
+    Tests that need either variable set still set it themselves with
+    ``monkeypatch.setenv``, which applies after this fixture.
+    """
+    for name in ("TRADING_BOT_TOKEN", "TRADING_BOT_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def make_candle(offset_hours: int, o: float, h: float, l: float, c: float, v: float = 100.0):
     """Build one candle at a fixed offset from the fixture epoch."""
     return Candle(START + timedelta(hours=offset_hours), o, h, l, c, v)
