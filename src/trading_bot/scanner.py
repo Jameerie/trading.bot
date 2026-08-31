@@ -12,10 +12,11 @@ from dataclasses import dataclass
 from .config import Config
 from .instruments import get_instrument
 from .precompute import build_cache
-from .models import Candle, Signal, Timeframe
+from .models import Candle, Direction, Signal, Timeframe
 from .resample import htf_closed_before
 from .strategy import get_strategy
 from .strategy.base import MarketContext, build_context
+from .strategy.confluence import ConfluenceResult
 from .structure import Trend, classify_trend, swing_points
 
 
@@ -27,10 +28,21 @@ class Evaluation:
     signal: Signal | None
     confluence_fraction: float | None
     context: MarketContext | None
+    confluence: ConfluenceResult | None = None
+    direction: Direction | None = None
 
     @property
     def has_signal(self) -> bool:
         return self.signal is not None
+
+    @property
+    def near_miss(self) -> bool:
+        """Scored something, but not enough. Worth explaining rather than hiding.
+
+        "No setup" is a real answer, but "no setup, and here is what was missing"
+        is the one a person can learn from and act on tomorrow.
+        """
+        return self.signal is None and self.confluence_fraction is not None
 
 
 def htf_bias(candles: list[Candle], index: int, config: Config) -> Trend:
@@ -72,15 +84,26 @@ def evaluate_at(
 
     signal = strategy.evaluate(context)
 
-    # Report the score even when nothing qualified, so a user can see how close
-    # the market came rather than just being told "no".
+    # Report the whole scorecard even when nothing qualified, so a user can see
+    # which conditions were met and which were not, rather than just being told
+    # "no". The near-miss explanation in ``playbook`` is built from this.
     fraction = None
+    scored = None
+    direction = None
     if context.is_warm:
         direction = strategy.candidate_direction(context)
         if direction is not None:
-            fraction = strategy.engine.score(context, direction).fraction
+            scored = strategy.engine.score(context, direction)
+            fraction = scored.fraction
 
-    return Evaluation(index=index, signal=signal, confluence_fraction=fraction, context=context)
+    return Evaluation(
+        index=index,
+        signal=signal,
+        confluence_fraction=fraction,
+        context=context,
+        confluence=scored,
+        direction=direction,
+    )
 
 
 def scan_latest(candles: list[Candle], symbol: str, config: Config, strategy=None) -> Evaluation:

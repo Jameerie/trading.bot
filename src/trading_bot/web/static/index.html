@@ -41,6 +41,8 @@
 
 <nav class="tabs" role="tablist" aria-label="Views">
   <button class="tabs__btn is-active" data-view="scan" role="tab" aria-selected="true">Scan</button>
+  <button class="tabs__btn" data-view="pairs" role="tab" aria-selected="false">Pairs</button>
+  <button class="tabs__btn" data-view="forecast" role="tab" aria-selected="false">Predictions</button>
   <button class="tabs__btn" data-view="backtest" role="tab" aria-selected="false">Backtest</button>
   <button class="tabs__btn" data-view="calibrate" role="tab" aria-selected="false">Calibrate</button>
   <button class="tabs__btn" data-view="risk" role="tab" aria-selected="false">Sizing</button>
@@ -81,6 +83,56 @@
   </section>
 
   <!-- ============================================================ BACKTEST -->
+  <!-- Win rate by pair. The correction note is part of the view, not a footnote:
+       the whole point of the page is that a table of sixty win rates lies unless
+       the intervals are widened for the fact that you looked at sixty. -->
+  <section class="view" id="view-pairs" role="tabpanel">
+    <div class="controls">
+      <label class="field field--grow">
+        <span>Pairs or group</span>
+        <input id="pairs-symbols" type="text" placeholder="all, majors, crosses, metals..."
+               autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Timeframe</span>
+        <select id="pairs-timeframe"></select>
+      </label>
+      <label class="field">
+        <span>Source</span>
+        <select id="pairs-source">
+          <option value="">config default</option>
+          <option value="csv">csv</option>
+          <option value="synthetic">synthetic</option>
+          <option value="rest">rest</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Bars each</span>
+        <input id="pairs-bars" type="number" value="2000" min="250" max="8000" step="250">
+      </label>
+      <label class="check">
+        <input type="checkbox" id="pairs-oos" checked><span>Out-of-sample only</span>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="pairs-persistence"><span>Test whether picking pairs helps</span>
+      </label>
+      <button class="btn btn--primary" id="pairs-run" type="button">Measure</button>
+    </div>
+    <p class="hint">Walks every bar of history for every pair. Sixty pairs takes a minute.</p>
+    <div id="pairs-results" class="stack"></div>
+  </section>
+
+  <!-- The forward record: predictions written down before the outcome was
+       knowable. Kept apart from Backtest on purpose. -->
+  <section class="view" id="view-forecast" role="tabpanel">
+    <div class="controls">
+      <button class="btn btn--primary" id="fc-refresh" type="button">Refresh</button>
+      <button class="btn" id="fc-resolve" type="button">Settle against real candles</button>
+    </div>
+    <p class="hint">A backtest cannot add a single entry to this board. That is the point of it.</p>
+    <div id="fc-results" class="stack"></div>
+  </section>
+
   <section class="view" id="view-backtest" role="tabpanel">
     <div class="controls">
       <label class="field">

@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 
 from .backtest import run_backtest
 from .config import Config
-from .metrics import Metrics, compute_metrics, evaluate_gate
+from .metrics import Metrics, compute_metrics, effective_ratio, evaluate_gate
 from .models import Candle
 
 
@@ -117,6 +117,109 @@ def recommend(rows: list[SweepRow], config: Config) -> tuple[float | None, str]:
         f"{config.target.win_rate:.0%} target. Treat it as the best available setting, "
         f"not as a validated one."
     )
+
+
+@dataclass(frozen=True)
+class CeilingRow:
+    """One reward-ceiling setting's results."""
+
+    ceiling: float
+    metrics: Metrics
+    realised_ratio: float
+    expired_share: float
+
+
+def sweep_ceiling(
+    candles: list[Candle],
+    symbol: str,
+    config: Config,
+    ceilings: list[float] | None = None,
+    split: float | None = 0.7,
+) -> tuple[CeilingRow, ...]:
+    """Sweep ``risk.max_risk_reward`` — the dial nobody looks at.
+
+    The confluence threshold decides *which* setups are taken. The reward ceiling
+    decides how far the target is allowed to sit, and it turns out to matter more:
+    a target the market never reaches does not become a win by being ambitious, it
+    becomes a trade that expires on the time limit at whatever price is showing.
+
+    Watch two columns beside the win rate. ``realised`` is the ratio the trades
+    actually paid — when it sits far below the planned ratio, the targets are not
+    being reached. ``expired`` is the share that closed on the horizon rather than
+    at a barrier, which is the same problem seen from the other side.
+    """
+    levels = ceilings or [6.0, 8.0, 10.0, 12.0, 15.0, 20.0]
+    boundary = int(len(candles) * split) if split else None
+
+    rows: list[CeilingRow] = []
+    for level in levels:
+        if level <= config.risk.min_risk_reward:
+            continue
+        tuned = replace(config, risk=replace(config.risk, max_risk_reward=level))
+        result = run_backtest(candles, symbol, tuned, start=boundary,
+                              label=f"ceiling<={level}")
+        metrics = compute_metrics(result.trades, config.target.confidence)
+        rows.append(
+            CeilingRow(
+                ceiling=level,
+                metrics=metrics,
+                realised_ratio=effective_ratio(metrics) if metrics.trades else 0.0,
+                expired_share=(metrics.expired / metrics.trades) if metrics.trades else 0.0,
+            )
+        )
+    return tuple(rows)
+
+
+def format_ceiling_sweep(rows: tuple[CeilingRow, ...], symbol: str) -> str:
+    """Render the reward-ceiling sweep, and say what to read from it."""
+    if not rows:
+        return "No ceiling above the risk floor to test."
+
+    lines = [
+        f"Reward-ceiling sweep - {symbol}",
+        "",
+        "How far the take profit is allowed to sit. A distant target is only worth",
+        "having if the market reaches it; when it does not, the trade expires on the",
+        "time limit instead, at whatever price happens to be showing.",
+        "",
+        f"{'max R:R':>8}  {'trades':>6}  {'win rate':>8}  {'expectancy':>10}  "
+        f"{'total R':>8}  {'planned':>8}  {'realised':>8}  {'expired':>7}",
+        "-" * 82,
+    ]
+    for row in rows:
+        m = row.metrics
+        if m.is_empty:
+            lines.append(f"{row.ceiling:>8.0f}  {0:>6}   no trades")
+            continue
+        lines.append(
+            f"{row.ceiling:>8.0f}  {m.trades:>6}  {m.win_rate:>7.1%}  "
+            f"{m.expectancy_r:>+9.2f}R  {m.total_r:>+7.1f}R  "
+            f"{m.average_rr_planned:>7.1f}:1  {row.realised_ratio:>7.1f}:1  "
+            f"{row.expired_share:>6.0%}"
+        )
+
+    usable = [r for r in rows if r.metrics.trades]
+    if usable:
+        best = max(usable, key=lambda r: r.metrics.expectancy_r)
+        gap = [r for r in usable if r.metrics.average_rr_planned - r.realised_ratio > 2.0]
+        lines += ["", "What to read from this:"]
+        lines.append(
+            f"  Best expectancy here is at max_risk_reward = {best.ceiling:.0f} "
+            f"({best.metrics.expectancy_r:+.2f}R over {best.metrics.trades} trades)."
+        )
+        if gap:
+            worst = max(gap, key=lambda r: r.metrics.average_rr_planned - r.realised_ratio)
+            lines.append(
+                f"  At {worst.ceiling:.0f} the plan averages "
+                f"{worst.metrics.average_rr_planned:.1f}:1 and the trades pay "
+                f"{worst.realised_ratio:.1f}:1 — those targets are not being reached."
+            )
+        lines += [
+            "  Picking the best row is a fit to this data like any other. Prefer a level",
+            "  that is good across neighbouring rows over one that spikes alone, and",
+            "  confirm it on a different period before changing your config.",
+        ]
+    return "\n".join(lines)
 
 
 def format_sweep(result: SweepResult) -> str:

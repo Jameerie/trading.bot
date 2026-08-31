@@ -70,6 +70,58 @@ def _z_for(confidence: float) -> float:
     return (lo + hi) / 2
 
 
+def mean_interval(values: list[float], confidence: float = 0.95) -> Interval:
+    """Confidence interval on the *mean* of a sample, not on a proportion.
+
+    Win rate has Wilson; expectancy needs its own bound, because ranking pairs by
+    a point-estimate expectancy is how the luckiest pair in a list of thirty gets
+    mistaken for the best one. This is the ordinary standard-error interval on
+    the mean, which is sound here for the reason it usually is not in finance:
+    we are averaging R-multiples that are bounded below at -1, so the tail that
+    breaks the normal approximation is the *upside*, and an overstated upper
+    bound cannot flatter a decision made on the lower one.
+
+    The interval is returned in the same units as the values (R), so it is not
+    clamped to [0, 1] the way a proportion is.
+    """
+    n = len(values)
+    if n == 0:
+        return Interval(0.0, 0.0, confidence)
+    mean = sum(values) / n
+    if n == 1:
+        # One observation says nothing about the precision of a mean, so the
+        # honest interval is unbounded. Returning (mean, mean) instead — a
+        # zero-width interval — would let a single winning trade pass any
+        # lower-bound test put to it, which is the exact failure this whole
+        # module is built to prevent.
+        return Interval(float("-inf"), float("inf"), confidence)
+    variance = sum((v - mean) ** 2 for v in values) / (n - 1)
+    stderr = math.sqrt(variance / n)
+    margin = _z_for(confidence) * stderr
+    return Interval(mean - margin, mean + margin, confidence)
+
+
+def family_confidence(confidence: float, comparisons: int) -> float:
+    """Per-test confidence needed for ``comparisons`` intervals to hold together.
+
+    Test one pair at 95% and a one-in-twenty chance of a spurious result is
+    acceptable. Test sixty pairs at 95% and roughly three of them will look
+    significant on noise alone — then the best-looking pair gets picked, which is
+    how a universe scan manufactures an edge that is not there.
+
+    Šidák's correction: for all ``n`` intervals to cover simultaneously at level
+    ``C``, each must be built at level ``C ** (1/n)``. At 95% across 30 pairs
+    that is 99.83% per pair, and the intervals widen accordingly. Nothing else
+    changes — the same win rates are reported, they are simply held to the
+    standard that looking at thirty of them demands.
+    """
+    if comparisons <= 1:
+        return confidence
+    if not 0 < confidence < 1:
+        raise ValueError(f"confidence must be in (0, 1), got {confidence}")
+    return confidence ** (1.0 / comparisons)
+
+
 @dataclass(frozen=True)
 class Metrics:
     """Everything worth knowing about a set of trades."""

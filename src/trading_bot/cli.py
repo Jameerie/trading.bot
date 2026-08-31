@@ -8,20 +8,37 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from . import __version__
+from . import exposure
 from .backtest import run_backtest, split_backtest
-from .calibrate import format_sweep, sweep
+from .calibrate import format_ceiling_sweep, format_sweep, sweep, sweep_ceiling
+from .clock import humanise_delta
 from .config import Config, load_config
 from .data.csv_source import CsvSource, load_csv, write_csv
 from .data.synthetic import SyntheticSource, generate
 from .errors import TradingBotError
-from .instruments import get_instrument
+from .forecast import (
+    bars_to_time,
+    build_prediction,
+    measure_base_rate,
+    resolve_open_predictions,
+    scoreboard,
+)
+from .instruments import expand_symbols, get_instrument, group_names
 from .journal import Journal
 from .limits import evaluate_limits
 from .metrics import compute_metrics
-from .models import Timeframe
+from .models import Timeframe, utc_now
+from .pairs import (
+    analyse_universe,
+    format_persistence,
+    format_universe,
+    persistence_check,
+)
+from .playbook import daily_briefing, explain_no_signal
 from .report import format_comparison, format_result, format_trades
 from .risk_analysis import analyse, analyse_from_metrics, format_report
 from .scanner import scan_latest
@@ -46,57 +63,240 @@ def build_source(config: Config, override: str | None = None):
 
 
 def cmd_scan(args, config: Config) -> int:
-    """Evaluate the latest closed bar for each symbol and say what to do."""
+    """Evaluate the latest closed bar for each symbol and say what to do.
+
+    The output is the product, so it is deliberately verbose: a briefing in the
+    reader's own timezone, a full card per setup with the prediction it implies,
+    an explanation of the near misses, and the currency exposure the whole lot
+    would create. ``--brief`` cuts it back for someone who has read it before.
+    """
     source = build_source(config, args.source)
     timeframe = Timeframe.parse(args.timeframe or config.data.timeframe)
-    symbols = args.symbols or config.data.symbols
+    symbols = expand_symbols(args.symbols) if args.symbols else config.data.resolved_symbols
     journal = Journal(config.journal_path) if not args.no_journal else None
+    clock = config.clock
+    detail = "brief" if (args.brief or args.compact) else config.display.detail
+    now = utc_now()
 
     print(BANNER)
-    print(f"Scanning {len(symbols)} symbol(s) on {timeframe.name}, "
+    print()
+    for line in daily_briefing(config, clock, now):
+        print(line)
+    print()
+    print(f"  Scanning {len(symbols)} instrument(s) on {timeframe.name} - "
           f"min confluence {config.strategy.min_confluence:.0%}, "
-          f"min R:R {config.risk.min_risk_reward:.0f}:1\n")
+          f"min R:R {config.risk.min_risk_reward:.0f}:1")
+    print()
 
     status = evaluate_limits(Journal(config.journal_path).read(), config)
     if status.breached:
         print(status.banner())
         print()
 
-    found = 0
+    signals: list = []
+    predictions: dict = {}
+    base_rates: dict = {}
+    near_misses: list = []
+    unavailable: list = []
+
     for symbol in symbols:
         try:
             candles = source.fetch(symbol, timeframe, config.data.lookback_bars)
             evaluation = scan_latest(candles, symbol, config)
         except TradingBotError as exc:
-            print(f"{symbol:<8} could not scan: {exc}")
+            unavailable.append((symbol, str(exc)))
             continue
 
         if not evaluation.has_signal:
-            print(no_signal_message(symbol, timeframe.name, evaluation.confluence_fraction))
+            near_misses.append((symbol, evaluation))
             continue
 
-        found += 1
         signal = evaluation.signal
-        instrument = get_instrument(symbol)
-        print()
-        print(format_signal_compact(signal, instrument) if args.compact
-              else format_signal(signal, instrument))
-        print()
-        if journal is not None:
-            journal.record(signal)
+        signals.append(signal)
+        # Measure the base rate only for pairs that actually signalled: it costs
+        # a backtest per symbol, and a rate nobody will read is a rate not worth
+        # computing.
+        if not args.no_base_rate:
+            base_rates[symbol] = measure_base_rate(candles, symbol, config)
+            predictions[symbol] = build_prediction(signal, config, base_rates[symbol])
 
-    print(f"\n{found} setup(s) found across {len(symbols)} symbol(s).")
-    if found and journal is not None:
-        print(f"Recorded to {journal.path}")
-    if found == 0:
-        print("Nothing met the rules. No setup is a position too.")
+    # ------------------------------------------------------------- the setups
+    if signals:
+        print("=" * 78)
+        print(f"  {len(signals)} SETUP(S) FOUND")
+        print("=" * 78)
+        for signal in signals:
+            instrument = get_instrument(signal.symbol)
+            print()
+            if args.compact:
+                print(format_signal_compact(signal, instrument))
+            else:
+                print(format_signal(
+                    signal, instrument, config, clock,
+                    prediction=predictions.get(signal.symbol), detail=detail,
+                ))
+            print()
+            if journal is not None:
+                journal.record_once(signal)
+
+    # ---------------------------------------------------------- what was close
+    ranked = sorted(
+        near_misses, key=lambda pair: pair[1].confluence_fraction or 0.0, reverse=True
+    )
+    explained = (
+        [n for n in ranked if (n[1].confluence_fraction or 0) >= 0.5][: args.explain]
+        if detail == "full"
+        else []
+    )
+    explained_symbols = {symbol for symbol, _ in explained}
+
+    if explained:
+        print("-" * 78)
+        print(f"  CLOSEST TO A SETUP  ({len(explained)} of {len(near_misses)} pairs "
+              f"with no trade)")
+        print("-" * 78)
+        for symbol, evaluation in explained:
+            print()
+            for line in explain_no_signal(
+                symbol, timeframe.name, evaluation.confluence_fraction,
+                evaluation.confluence, evaluation.direction, config,
+                get_instrument(symbol), clock,
+            ):
+                print(line)
+        print()
+
+    # Every remaining pair still gets a line. A pair that silently vanished from
+    # the output would be indistinguishable from one that was never scanned.
+    rest = [(sym, ev) for sym, ev in ranked if sym not in explained_symbols]
+    if rest:
+        if explained:
+            print("-" * 78)
+            print("  NOTHING HERE  (scanned, scored, nowhere near)")
+            print("-" * 78)
+        for symbol, evaluation in rest:
+            print(f"  {no_signal_message(symbol, timeframe.name, evaluation.confluence_fraction)}")
+        print()
+
+    # ------------------------------------------------------------- the exposure
+    if len(signals) > 1:
+        report = exposure.analyse(signals, config, base_rates)
+        print(exposure.format_exposure(report, config))
+        print()
+
+    # ---------------------------------------------------------------- the tally
+    print("=" * 78)
+    print(f"  {len(signals)} setup(s) found across {len(symbols)} instrument(s) scanned. "
+          f"{len(near_misses)} had none.")
+    if unavailable:
+        print(f"  {len(unavailable)} could not scan (no data): "
+              f"{', '.join(s for s, _ in unavailable[:8])}"
+              f"{' and others' if len(unavailable) > 8 else ''}")
+    if signals and journal is not None:
+        print(f"  Recorded as predictions in {journal.path} — settle them later with:")
+        print("    python -m trading_bot forecast --resolve")
+    if not signals:
+        print("  Nothing met the rules. No setup is a position too.")
+    print("=" * 78)
+    return 0
+
+
+def cmd_pairs(args, config: Config) -> int:
+    """Measure the win rate pair by pair, and say which pairs are worth trading."""
+    source = build_source(config, args.source)
+    timeframe = Timeframe.parse(args.timeframe or config.data.timeframe)
+    symbols = expand_symbols(args.symbols) if args.symbols else config.data.resolved_symbols
+    bars = args.bars or max(config.data.lookback_bars, 1500)
+
+    print(BANNER)
+    print(f"\nMeasuring {len(symbols)} instrument(s) on {timeframe.name}, "
+          f"{bars} bars each. This walks every bar of history, so it takes a moment.\n")
+
+    candles_by_symbol: dict[str, list] = {}
+    for symbol in symbols:
+        try:
+            candles_by_symbol[symbol.upper()] = source.fetch(symbol, timeframe, bars)
+        except TradingBotError:
+            continue
+
+    split = None if args.split in (0, None) else args.split
+    report = analyse_universe(candles_by_symbol, config, split=split, symbols=symbols)
+    print(format_universe(report, config))
+
+    if args.persistence:
+        print()
+        print(format_persistence(persistence_check(candles_by_symbol, config)))
+    else:
+        print()
+        print("  Before you act on the table above, test whether picking pairs on past")
+        print("  results carries forward at all:  python -m trading_bot pairs --persistence")
+    return 0
+
+
+def cmd_forecast(args, config: Config) -> int:
+    """Show, settle and score the predictions this tool has made.
+
+    This is the honest scoreboard, and it is deliberately separate from the
+    backtest: a backtest replays trades whose outcome was already in the file,
+    and cannot contribute a single entry here.
+    """
+    journal = Journal(args.path or config.journal_path)
+    clock = config.clock
+    now = utc_now()
+
+    print(BANNER)
+    print()
+
+    if args.resolve:
+        source = build_source(config, args.source)
+        print("Settling open predictions against real candles, "
+              "by the same rules the backtest uses...\n")
+        reports = resolve_open_predictions(journal, source, config)
+        if not reports:
+            print("  No open predictions to settle.")
+        for item in reports:
+            if item["status"] == "resolved":
+                print(f"  {item['symbol']:<8} {item['outcome']:<8} "
+                      f"{item['r_multiple']:+.2f}R   {item['detail']}")
+            else:
+                print(f"  {item['symbol']:<8} {item['status']:<8}          {item['detail']}")
+        print()
+
+    open_entries = journal.open_entries()
+    if open_entries:
+        print("-" * 78)
+        print(f"  LIVE PREDICTIONS  ({len(open_entries)} awaiting an answer)")
+        print("-" * 78)
+        for entry in open_entries[-20:]:
+            sig = entry.signal
+            issued = datetime.fromisoformat(entry.issued_at)
+            deadline = bars_to_time(
+                issued, config.backtest.max_bars_in_trade,
+                Timeframe.parse(sig.get("timeframe", config.data.timeframe)),
+            )
+            state = "EXPIRED" if now > deadline else humanise_delta(deadline - now)
+            print(f"  {sig.get('symbol', '?'):<8} {sig.get('direction', '?'):<5} "
+                  f"entry {sig.get('entry')}  tp {sig.get('take_profit')}  "
+                  f"sl {sig.get('stop_loss')}")
+            print(f"           made {clock.stamp(issued)}  -  resolves by "
+                  f"{clock.stamp(deadline)} ({state})")
+        print()
+
+    board = scoreboard(journal, config.target.confidence)
+    print("=" * 78)
+    print("  FORWARD RECORD  (predictions made before the outcome was knowable)")
+    print("=" * 78)
+    for line in board.summary(clock):
+        print(f"  {line}")
+    print()
+    print("  A backtest cannot add a single trade to this number. That is the point of it.")
+    print("=" * 78)
     return 0
 
 
 def cmd_backtest(args, config: Config) -> int:
     """Measure the strategy on history."""
     candles = _load_candles(args, config)
-    symbol = args.symbol or config.data.symbols[0]
+    symbol = args.symbol or config.data.resolved_symbols[0]
 
     print(BANNER)
     print(f"Backtesting {symbol} on {len(candles)} bars\n")
@@ -119,12 +319,21 @@ def cmd_backtest(args, config: Config) -> int:
 def cmd_calibrate(args, config: Config) -> int:
     """Sweep the confluence threshold to expose the selectivity trade-off."""
     candles = _load_candles(args, config)
-    symbol = args.symbol or config.data.symbols[0]
+    symbol = args.symbol or config.data.resolved_symbols[0]
 
     print(BANNER)
     print(f"Calibrating {symbol} on {len(candles)} bars "
           f"({'out-of-sample only' if args.split else 'full series'})\n")
-    print(format_sweep(sweep(candles, symbol, config, split=args.split)))
+    if args.ceiling:
+        print(format_ceiling_sweep(
+            sweep_ceiling(candles, symbol, config, split=args.split), symbol
+        ))
+    else:
+        print(format_sweep(sweep(candles, symbol, config, split=args.split)))
+        print()
+        print("The confluence dial decides which setups are taken. How far the target may")
+        print("sit is a separate dial, and on some data it matters more:")
+        print("  python -m trading_bot calibrate --ceiling")
     return 0
 
 
@@ -166,7 +375,7 @@ def cmd_risk(args, config: Config) -> int:
     print(BANNER)
     if args.from_backtest:
         candles = _load_candles(args, config)
-        symbol = args.symbol or config.data.symbols[0]
+        symbol = args.symbol or config.data.resolved_symbols[0]
         result = run_backtest(candles, symbol, config)
         metrics = compute_metrics(result.trades, config.target.confidence)
         if metrics.is_empty:
@@ -198,7 +407,7 @@ def cmd_data(args, config: Config) -> int:
 
     if args.generate:
         out_dir.mkdir(parents=True, exist_ok=True)
-        for symbol in (args.symbols or config.data.symbols):
+        for symbol in expand_symbols(args.symbols or config.data.symbols):
             source = SyntheticSource(seed=args.seed)
             candles = source.fetch(symbol, timeframe, args.bars)
             path = out_dir / f"{symbol.upper()}_{timeframe.name}.csv"
@@ -226,7 +435,7 @@ def _load_candles(args, config: Config):
     """Resolve candles for backtest/calibrate from the flags given."""
     if args.csv:
         return load_csv(args.csv)
-    symbol = args.symbol or config.data.symbols[0]
+    symbol = args.symbol or config.data.resolved_symbols[0]
     timeframe = Timeframe.parse(args.timeframe or config.data.timeframe)
     source = build_source(config, args.source)
     return source.fetch(symbol, timeframe, args.bars or config.data.lookback_bars)
@@ -242,13 +451,40 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", help="path to a TOML config file")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    groups = ", ".join(group_names())
     scan = sub.add_parser("scan", help="show what to do right now")
-    scan.add_argument("--symbols", nargs="+", help="override the configured symbols")
+    scan.add_argument("--symbols", nargs="+",
+                      help=f"symbols or group names to scan ({groups})")
     scan.add_argument("--timeframe", help="override the configured timeframe")
     scan.add_argument("--source", choices=["csv", "rest", "synthetic"])
     scan.add_argument("--compact", action="store_true", help="one line per signal")
+    scan.add_argument("--brief", action="store_true",
+                      help="drop the step-by-step coaching from each card")
+    scan.add_argument("--explain", type=int, default=3, metavar="N",
+                      help="how many near-miss pairs to explain in full (default 3)")
+    scan.add_argument("--no-base-rate", action="store_true", dest="no_base_rate",
+                      help="skip the per-pair base-rate measurement (faster)")
     scan.add_argument("--no-journal", action="store_true", help="do not record signals")
     scan.set_defaults(func=cmd_scan)
+
+    prs = sub.add_parser("pairs", help="win rate pair by pair, and which to trade")
+    prs.add_argument("--symbols", nargs="+",
+                     help=f"symbols or group names to measure ({groups})")
+    prs.add_argument("--timeframe")
+    prs.add_argument("--source", choices=["csv", "rest", "synthetic"])
+    prs.add_argument("--bars", type=int, help="bars of history per pair")
+    prs.add_argument("--split", type=float, default=0.7,
+                     help="measure on the out-of-sample tail (default 0.7); 0 for full series")
+    prs.add_argument("--persistence", action="store_true",
+                     help="walk-forward test of whether picking pairs helps at all")
+    prs.set_defaults(func=cmd_pairs)
+
+    fc = sub.add_parser("forecast", help="live predictions and the forward scoreboard")
+    fc.add_argument("--resolve", action="store_true",
+                    help="settle open predictions against real candles")
+    fc.add_argument("--source", choices=["csv", "rest", "synthetic"])
+    fc.add_argument("--path", help="journal file")
+    fc.set_defaults(func=cmd_forecast)
 
     back = sub.add_parser("backtest", help="measure the strategy on history")
     back.add_argument("--csv", help="path to an OHLCV CSV")
@@ -269,6 +505,8 @@ def build_parser() -> argparse.ArgumentParser:
     cal.add_argument("--bars", type=int)
     cal.add_argument("--split", type=float, default=0.7,
                      help="measure each threshold out-of-sample (default 0.7); 0 for full series")
+    cal.add_argument("--ceiling", action="store_true",
+                     help="sweep the reward ceiling instead of the confluence threshold")
     cal.set_defaults(func=cmd_calibrate)
 
     jour = sub.add_parser("journal", help="show journalled signals, or close one")

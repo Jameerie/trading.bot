@@ -353,6 +353,14 @@ tr[data-hl="1"] td { background: var(--accent-soft); }
 .verdict__tag[data-v="EDGE CONFIRMED"]    { background: var(--long-soft);  color: var(--long); }
 .verdict__tag[data-v="NO EDGE"]           { background: var(--short-soft); color: var(--short); }
 .verdict__tag[data-v="NO DATA"]           { background: var(--surface-2);  color: var(--text-dim); }
+.verdict__tag[data-v="TRADE IT"]          { background: var(--long-soft);  color: var(--long); }
+.verdict__tag[data-v="PROMISING"]         { background: var(--accent-soft); color: var(--accent); }
+.verdict__tag[data-v="AVOID"]             { background: var(--short-soft); color: var(--short); }
+.verdict__tag[data-v="NO SETUPS"]         { background: var(--surface-2);  color: var(--text-dim); }
+.verdict__tag[data-v="SELECTION HELPED"]  { background: var(--long-soft);  color: var(--long); }
+.verdict__tag[data-v="SELECTION HURT"]    { background: var(--short-soft); color: var(--short); }
+.verdict__tag[data-v="SELECTION MADE NO DIFFERENCE"],
+.verdict__tag[data-v="NOT TESTABLE"]      { background: var(--surface-2);  color: var(--text-dim); }
 
 /* Account-level limit warning. Loud, because it is the one message here that
    says stop rather than describing a setup - but it never hides the advice. */
@@ -448,4 +456,73 @@ tr[data-hl="1"] td { background: var(--accent-soft); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+
+/* ------------------------------------------------- prediction and playbook */
+
+/* A signal is a claim about bars that do not exist yet. This block states the
+   claim, its deadline in the reader's own clock, and how often claims like it
+   have come true - or says plainly that there is no sample to quote. */
+.pred {
+  padding: 13px 16px; border-top: 1px solid var(--border-soft);
+  background: var(--accent-soft);
+}
+.pred__h {
+  font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--accent); margin-bottom: 7px;
+}
+.pred__claim { margin: 0 0 9px; font-size: 13.5px; font-weight: 560; color: var(--text); }
+.pred__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; }
+.pred__k {
+  display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--text-faint);
+}
+.pred__v { font-family: var(--mono); font-size: 12.5px; color: var(--text); }
+.pred__rate { margin: 9px 0 0; font-size: 12.5px; color: var(--text-dim); line-height: 1.5; }
+.pred__src { display: block; font-size: 11px; color: var(--text-faint); }
+.pred__none { color: var(--warn); }
+
+/* The playbook, collapsed by default past the first section. Someone placing
+   their first trade opens all of them; someone placing their fiftieth opens none. */
+.plans { border-top: 1px solid var(--border-soft); }
+.plan { border-bottom: 1px solid var(--border-soft); }
+.plan:last-child { border-bottom: 0; }
+.plan__h {
+  padding: 11px 16px; cursor: pointer; font-size: 11px; font-weight: 700;
+  letter-spacing: .05em; text-transform: uppercase; color: var(--text-dim);
+  list-style: none; user-select: none;
+}
+.plan__h::-webkit-details-marker { display: none; }
+.plan__h::before { content: "+ "; color: var(--text-faint); }
+.plan[open] .plan__h::before { content: "- "; }
+.plan__h:hover { color: var(--text); }
+.plan__body {
+  margin: 0; padding: 0 16px 13px; font-family: var(--mono); font-size: 11.5px;
+  line-height: 1.6; color: var(--text-dim); white-space: pre-wrap; overflow-x: auto;
+}
+
+/* What a near-miss pair still needs. The teaching half of "no setup". */
+.need { margin-top: 9px; }
+.need__h {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--text-faint); margin-bottom: 5px;
+}
+.need ul { margin: 0; padding-left: 17px; }
+.need li { font-size: 12.5px; color: var(--text-dim); margin-bottom: 4px; line-height: 1.5; }
+.need strong { color: var(--text); }
+
+.picks { margin: 0; padding-left: 17px; }
+.picks li { font-size: 12.5px; color: var(--text-dim); margin-bottom: 4px; line-height: 1.5; }
+
+.card__desc { margin: 0; padding: 0 16px 9px; font-size: 12.5px; color: var(--text-faint); }
+.card--watch { border-left: 3px solid var(--warn); }
+.chip--met { background: var(--long-soft); color: var(--long); }
+
+.hint { margin: -4px 0 12px; font-size: 12px; color: var(--text-faint); }
+.dim { color: var(--text-faint); }
+.mono { font-family: var(--mono); }
+
+@media (max-width: 560px) {
+  .pred__grid { grid-template-columns: 1fr; }
 }

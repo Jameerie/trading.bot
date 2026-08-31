@@ -20,7 +20,26 @@ from ..config import Config
 from ..data.csv_source import CsvSource
 from ..data.synthetic import SyntheticSource
 from ..errors import TradingBotError
-from ..instruments import REGISTRY, get_instrument
+from ..clock import session_windows
+from ..exposure import analyse as analyse_exposure
+from ..forecast import (
+    bars_to_time,
+    build_prediction,
+    measure_base_rate,
+    resolve_open_predictions,
+    scoreboard,
+)
+from ..instruments import GROUPS, REGISTRY, expand_symbols, get_instrument
+from ..pairs import analyse_universe, persistence_check
+from ..playbook import (
+    CHECK_GUIDE,
+    aftercare,
+    contingencies,
+    invalidation_plan,
+    management_plan,
+    order_ticket,
+    timing_plan,
+)
 from ..journal import Journal
 from ..limits import evaluate_limits
 from ..metrics import compute_metrics, evaluate_gate, measure_edge
@@ -33,6 +52,11 @@ from ..structure import Trend
 # Chart payloads are capped so a phone on mobile data is not sent a 3000-bar
 # series it will only draw 200 pixels of.
 MAX_CHART_BARS = 180
+
+# A scan of the whole registry is a legitimate request — "all" is the default in
+# the shipped config — so the cap sits just above the registry size rather than
+# at the twenty that suited a three-pair tool.
+MAX_SCAN_SYMBOLS = 80
 
 
 class ApiError(Exception):
@@ -82,16 +106,23 @@ def _as_float(params: dict, key: str, default: float, low: float, high: float) -
 
 
 def _symbols_from(params: dict, config: Config) -> list[str]:
-    """Parse a symbol list from a comma-separated string or a JSON array."""
+    """Parse a symbol list, accepting group names as well as pairs.
+
+    ``majors``, ``crosses``, ``all`` and the rest expand here exactly as they do
+    in the config file, so the browser and the terminal accept the same input.
+    """
     raw = params.get("symbols")
     if not raw:
-        return list(config.data.symbols)
+        return config.data.resolved_symbols
     values = raw.split(",") if isinstance(raw, str) else list(raw)
-    symbols = [str(v).strip().upper() for v in values if str(v).strip()]
-    if not symbols:
+    cleaned = [str(v).strip() for v in values if str(v).strip()]
+    if not cleaned:
         raise ApiError("no symbols given")
-    if len(symbols) > 20:
-        raise ApiError(f"too many symbols ({len(symbols)}); 20 at a time is the limit")
+    symbols = expand_symbols(cleaned)
+    if len(symbols) > MAX_SCAN_SYMBOLS:
+        raise ApiError(
+            f"too many symbols ({len(symbols)}); {MAX_SCAN_SYMBOLS} at a time is the limit"
+        )
     return symbols
 
 
@@ -109,14 +140,52 @@ def candles_payload(candles: list[Candle], limit: int = MAX_CHART_BARS) -> list[
     ]
 
 
-def signal_payload(signal: Signal) -> dict:
-    """A signal plus the presentation fields the UI needs."""
+def _plan_body(lines: list[str]) -> list[str]:
+    """Strip a playbook block's heading, which the UI renders itself.
+
+    Every block from ``playbook`` opens with its own title at two spaces of
+    indent and continues at four or more, because the terminal card has no other
+    way to label a section. The browser puts that title in the disclosure
+    summary, so leaving it in the body prints it twice.
+    """
+    if lines and not lines[0].startswith("    "):
+        return lines[1:]
+    return lines
+
+
+def signal_payload(signal: Signal, config: Config | None = None, prediction=None) -> dict:
+    """A signal plus the presentation fields the UI needs.
+
+    With a config, the payload also carries the playbook — the same
+    step-by-step guidance the terminal card prints. The browser is not a
+    lesser client: it gets the advice, not just the prices.
+    """
     data = signal.to_dict()
     instrument = get_instrument(signal.symbol)
     data["digits"] = instrument.digits
     data["pip_size"] = instrument.pip_size
     data["session"] = session_label(signal.issued_at)
     data["reward_amount"] = round(signal.risk_amount * signal.risk_reward, 2)
+    data["description"] = instrument.describe()
+    data["peak_sessions"] = list(instrument.peak_sessions)
+
+    if config is not None:
+        clock = config.clock
+        data["issued_local"] = clock.stamp(signal.issued_at)
+        data["playbook"] = {
+            "order": _plan_body(order_ticket(signal, instrument, config)),
+            "timing": _plan_body(timing_plan(signal, instrument, clock)),
+            "invalidation": _plan_body(invalidation_plan(signal, instrument, config)),
+            "management": _plan_body(management_plan(signal, config, clock)),
+            "contingencies": _plan_body(contingencies(signal, instrument, config)),
+            "aftercare": _plan_body(aftercare(signal, config)),
+        }
+    if prediction is not None:
+        data["prediction"] = prediction.to_dict()
+        data["prediction"]["resolve_by_local"] = config.clock.stamp(prediction.resolve_by)
+        data["prediction"]["entry_deadline_local"] = config.clock.stamp(
+            prediction.entry_deadline
+        )
     return data
 
 
@@ -162,6 +231,7 @@ def settings(params: dict, config: Config) -> dict:
         "data": {
             "source": config.data.source,
             "symbols": list(config.data.symbols),
+            "resolved_symbols": config.data.resolved_symbols,
             "timeframe": config.data.timeframe,
             "htf_timeframe": config.data.htf_timeframe,
             "has_api_key": config.data.api_key is not None,
@@ -187,19 +257,32 @@ def symbols(params: dict, config: Config) -> dict:
         ],
         "timeframes": [tf.name for tf in Timeframe],
         "configured": list(config.data.symbols),
+        "resolved": config.data.resolved_symbols,
+        "groups": {name: list(members) for name, members in GROUPS.items()},
     }
 
 
 def scan(params: dict, config: Config) -> dict:
-    """Evaluate the latest closed bar for each requested symbol."""
+    """Evaluate the latest closed bar for each requested symbol.
+
+    The payload carries what the terminal card carries: the prediction each
+    signal amounts to, its measured base rate, the playbook for placing it, and
+    — for the pairs that did not qualify — which checks failed and what would
+    have to change. A phone is not a worse place to get advice from.
+    """
     wanted = _symbols_from(params, config)
     timeframe = Timeframe.parse(str(params.get("timeframe") or config.data.timeframe))
     source = _source_for(config, params.get("source"))
     want_chart = str(params.get("chart", "1")).lower() not in ("0", "false", "no")
+    want_rates = str(params.get("base_rates", "1")).lower() not in ("0", "false", "no")
     journal = Journal(config.journal_path)
     should_journal = str(params.get("journal", "0")).lower() in ("1", "true", "yes")
+    clock = config.clock
 
     results = []
+    signals: list[Signal] = []
+    base_rates: dict = {}
+
     for symbol in wanted:
         try:
             candles = source.fetch(symbol, timeframe, config.data.lookback_bars)
@@ -213,8 +296,11 @@ def scan(params: dict, config: Config) -> dict:
             "symbol": symbol,
             "timeframe": timeframe.name,
             "digits": instrument.digits,
+            "group": instrument.group,
+            "description": instrument.describe(),
             "last_price": candles[-1].close,
             "last_bar": candles[-1].timestamp.isoformat(),
+            "last_bar_local": clock.stamp(candles[-1].timestamp),
             "session": session_label(candles[-1].timestamp),
             "confluence": evaluation.confluence_fraction,
         }
@@ -222,24 +308,91 @@ def scan(params: dict, config: Config) -> dict:
             row["candles"] = candles_payload(candles)
 
         if evaluation.has_signal:
+            signal = evaluation.signal
+            signals.append(signal)
+            prediction = None
+            if want_rates:
+                base_rates[symbol] = measure_base_rate(candles, symbol, config)
+                prediction = build_prediction(signal, config, base_rates[symbol])
             row["status"] = "signal"
-            row["signal"] = signal_payload(evaluation.signal)
+            row["signal"] = signal_payload(signal, config, prediction)
             if should_journal:
-                recorded = journal.record_once(evaluation.signal)
+                recorded = journal.record_once(signal)
                 row["journalled"] = recorded is not None
         else:
             row["status"] = "no_setup"
+            row["guidance"] = _no_setup_payload(evaluation, config)
         results.append(row)
 
     found = sum(1 for r in results if r.get("status") == "signal")
-    return {
+    payload = {
         "scanned_at": datetime.now(timezone.utc).isoformat(),
+        "scanned_at_local": clock.stamp(datetime.now(timezone.utc)),
+        "timezone": clock.zone_name,
+        "timezone_abbrev": clock.abbrev(),
         "timeframe": timeframe.name,
         "min_confluence": config.strategy.min_confluence,
         "min_risk_reward": config.risk.min_risk_reward,
         "found": found,
+        "scanned": len(wanted),
+        "sessions": [
+            {"name": w.name, "local": w.label, "utc": w.utc_label}
+            for w in session_windows(clock, config.strategy.sessions)
+        ],
         "limits": _limits_payload(config, journal),
         "results": results,
+    }
+    if len(signals) > 1:
+        payload["exposure"] = analyse_exposure(signals, config, base_rates).to_dict()
+    return payload
+
+
+def _no_setup_payload(evaluation, config: Config) -> dict:
+    """Why this pair produced nothing, and what would change that."""
+    scored = evaluation.confluence
+    if scored is None or evaluation.direction is None:
+        return {
+            "direction": None,
+            "fraction": evaluation.confluence_fraction,
+            "met": [],
+            "missing": [],
+            "summary": (
+                "No directional bias to score here, or the indicators are still "
+                "warming up on the history available."
+            ),
+        }
+
+    from ..strategy.trend_pullback import DEFAULT_CHECKS
+
+    weights = {check.code: check.weight for check in DEFAULT_CHECKS}
+    fraction = evaluation.confluence_fraction or 0.0
+    short_by = config.strategy.min_confluence - fraction
+    return {
+        "direction": evaluation.direction.value,
+        "fraction": fraction,
+        "score": scored.score,
+        "max_score": scored.max_score,
+        "short_by": round(short_by, 4),
+        "met": [
+            {"code": r.code, "detail": r.detail, "weight": r.weight} for r in scored.reasons
+        ],
+        "missing": [
+            {
+                "code": code,
+                "weight": weights.get(code, 0.0),
+                "title": CHECK_GUIDE.get(code, (code, ""))[0],
+                "detail": CHECK_GUIDE.get(code, ("", "no description available"))[1],
+            }
+            for code in sorted(
+                scored.missing, key=lambda c: weights.get(c, 0.0), reverse=True
+            )
+        ],
+        "summary": (
+            f"Best case is a {evaluation.direction.value}, scoring {scored.score:.0f} of "
+            f"{scored.max_score:.0f} points ({fraction:.0%}). It needs "
+            f"{config.strategy.min_confluence:.0%}."
+        ),
+        "watchlist": fraction >= config.strategy.min_confluence - 0.12,
     }
 
 
@@ -321,7 +474,7 @@ def _result_payload(result, config: Config) -> dict:
 
 def backtest(params: dict, config: Config) -> dict:
     """Run a backtest, optionally split into in-sample and out-of-sample."""
-    symbol = str(params.get("symbol") or config.data.symbols[0]).upper()
+    symbol = str(params.get("symbol") or config.data.resolved_symbols[0]).upper()
     timeframe = Timeframe.parse(str(params.get("timeframe") or config.data.timeframe))
     bars = _as_int(params, "bars", config.data.lookback_bars, 250, 20_000)
     source = _source_for(config, params.get("source"))
@@ -349,7 +502,7 @@ def backtest(params: dict, config: Config) -> dict:
 
 def calibrate(params: dict, config: Config) -> dict:
     """Sweep the confluence threshold."""
-    symbol = str(params.get("symbol") or config.data.symbols[0]).upper()
+    symbol = str(params.get("symbol") or config.data.resolved_symbols[0]).upper()
     timeframe = Timeframe.parse(str(params.get("timeframe") or config.data.timeframe))
     bars = _as_int(params, "bars", config.data.lookback_bars, 250, 20_000)
     source = _source_for(config, params.get("source"))
@@ -390,7 +543,7 @@ def risk(params: dict, config: Config) -> dict:
     trials = _as_int(params, "trials", 3000, 200, 20_000)
 
     if params.get("from_backtest"):
-        symbol = str(params.get("symbol") or config.data.symbols[0]).upper()
+        symbol = str(params.get("symbol") or config.data.resolved_symbols[0]).upper()
         timeframe = Timeframe.parse(str(params.get("timeframe") or config.data.timeframe))
         bars = _as_int(params, "bars", config.data.lookback_bars, 250, 20_000)
         source = _source_for(config, params.get("source"))
@@ -508,12 +661,132 @@ def journal_close(params: dict, config: Config) -> dict:
     }
 
 
+def pairs(params: dict, config: Config) -> dict:
+    """Win rate by pair across the requested universe.
+
+    The expensive endpoint: it walks every bar of history for every symbol. The
+    bar count is capped rather than left to the caller, because a phone asking
+    for sixty pairs at twenty thousand bars is a request nobody wants answered.
+    """
+    wanted = _symbols_from(params, config)
+    timeframe = Timeframe.parse(str(params.get("timeframe") or config.data.timeframe))
+    source = _source_for(config, params.get("source"))
+    bars = _as_int(params, "bars", max(config.data.lookback_bars, 1500), 250, 8000)
+    split = _as_float(params, "split", 0.7, 0.0, 0.9)
+
+    candles_by_symbol: dict[str, list[Candle]] = {}
+    for symbol in wanted:
+        try:
+            candles_by_symbol[symbol.upper()] = source.fetch(symbol, timeframe, bars)
+        except TradingBotError:
+            continue
+
+    report = analyse_universe(
+        candles_by_symbol, config, split=split or None, symbols=wanted
+    )
+    payload = report.to_dict()
+    payload["bars_requested"] = bars
+
+    if str(params.get("persistence", "0")).lower() in ("1", "true", "yes"):
+        check = persistence_check(candles_by_symbol, config)
+        payload["persistence"] = {
+            "verdict": check.verdict(),
+            "selected": list(check.selected),
+            "rejected": list(check.rejected),
+            "gain_r": round(check.gain_r, 4),
+            "sign_agreement": round(check.sign_agreement, 4),
+            "pairs_compared": check.pairs_compared,
+            "everything": {
+                "trades": check.everything.trades,
+                "win_rate": round(check.everything.win_rate, 4),
+                "expectancy_r": round(check.everything.expectancy_r, 4),
+            },
+            "chosen": {
+                "trades": check.chosen.trades,
+                "win_rate": round(check.chosen.win_rate, 4),
+                "expectancy_r": round(check.chosen.expectancy_r, 4),
+            },
+        }
+    return payload
+
+
+def forecast(params: dict, config: Config) -> dict:
+    """Live predictions and the forward scoreboard.
+
+    Separate from ``/api/backtest`` on purpose, and the payload says so: a
+    backtest replays trades whose outcome was already known, and cannot put a
+    single entry on this board.
+    """
+    journal = Journal(config.journal_path)
+    clock = config.clock
+    now = datetime.now(timezone.utc)
+
+    live = []
+    for entry in journal.open_entries():
+        data = entry.signal
+        issued = datetime.fromisoformat(entry.issued_at)
+        timeframe = Timeframe.parse(str(data.get("timeframe", config.data.timeframe)))
+        deadline = bars_to_time(issued, config.backtest.max_bars_in_trade, timeframe)
+        live.append({
+            "id": entry.entry_id,
+            "symbol": data.get("symbol"),
+            "direction": data.get("direction"),
+            "entry": data.get("entry"),
+            "stop_loss": data.get("stop_loss"),
+            "take_profit": data.get("take_profit"),
+            "grade": data.get("grade"),
+            "risk_reward": data.get("risk_reward"),
+            "made_at": entry.issued_at,
+            "made_at_local": clock.stamp(issued),
+            "resolve_by": deadline.isoformat(),
+            "resolve_by_local": clock.stamp(deadline),
+            "overdue": now > deadline,
+        })
+
+    board = scoreboard(journal, config.target.confidence)
+    return {
+        "timezone": clock.zone_name,
+        "live": live,
+        "scoreboard": {
+            "made": board.made,
+            "resolved": board.resolved,
+            "still_open": board.still_open,
+            "win_rate": round(board.metrics.win_rate, 4),
+            "interval_low": round(board.metrics.win_rate_interval.low, 4),
+            "interval_high": round(board.metrics.win_rate_interval.high, 4),
+            "expectancy_r": round(board.metrics.expectancy_r, 4),
+            "total_r": round(board.metrics.total_r, 3),
+            "has_verdict": board.has_verdict,
+            "lines": board.summary(clock),
+        },
+        "note": (
+            "This board counts only predictions written down before the outcome was "
+            "knowable. A backtest cannot add to it."
+        ),
+    }
+
+
+def forecast_resolve(params: dict, config: Config) -> dict:
+    """Settle open predictions against fresh candles, by the backtest's own rules."""
+    journal = Journal(config.journal_path)
+    source = _source_for(config, params.get("source"))
+    reports = resolve_open_predictions(journal, source, config)
+    return {
+        "checked": len(reports),
+        "resolved": sum(1 for r in reports if r["status"] == "resolved"),
+        "results": reports,
+    }
+
+
 # Route table. Each entry is (handler, methods).
 ROUTES: dict[str, tuple] = {
     "/api/health": (health, ("GET",)),
     "/api/settings": (settings, ("GET",)),
     "/api/symbols": (symbols, ("GET",)),
     "/api/scan": (scan, ("GET", "POST")),
+    "/api/pairs": (pairs, ("GET", "POST")),
+    "/api/forecast": (forecast, ("GET",)),
+    "/api/forecast/resolve": (forecast_resolve, ("POST",)),
     "/api/backtest": (backtest, ("GET", "POST")),
     "/api/calibrate": (calibrate, ("GET", "POST")),
     "/api/risk": (risk, ("GET", "POST")),

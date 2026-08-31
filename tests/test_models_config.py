@@ -17,13 +17,19 @@ from trading_bot.config import (
 )
 from trading_bot.errors import ConfigError, DataError
 from trading_bot.instruments import (
+    GROUPS,
+    REGISTRY,
+    currency_name,
+    expand_symbols,
     get_instrument,
+    pairs_with_currency,
     pips_between,
     price_from_pips,
     round_price,
     same_price,
 )
 from trading_bot.models import Candle, Direction, Signal, Timeframe, utc_now
+from trading_bot.risk import stop_bounds
 from trading_bot.sessions import (
     LONDON,
     active_sessions,
@@ -135,6 +141,133 @@ class TestInstruments:
         instrument = get_instrument("GBPJPY")
         assert instrument.base == "GBP"
         assert instrument.quote == "JPY"
+
+
+class TestInstrumentUniverse:
+    """The registry covers what a broker actually offers, not a sample of it."""
+
+    def test_every_major_currency_pair_is_present(self):
+        majors = set(GROUPS["majors"])
+        assert majors == {
+            "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD",
+        }
+
+    def test_all_twenty_eight_major_crosses_exist(self):
+        """Eight major currencies make 28 pairs: 7 against the dollar, 21 crosses."""
+        assert len(GROUPS["majors"]) + len(GROUPS["crosses"]) == 28
+        legs = {"EUR", "GBP", "AUD", "NZD", "USD", "CAD", "CHF", "JPY"}
+        for symbol in GROUPS["crosses"]:
+            inst = get_instrument(symbol)
+            assert set(inst.currencies) <= legs
+            assert "USD" not in inst.currencies, "a cross has no dollar leg"
+
+    def test_no_pair_is_listed_twice_or_inverted(self):
+        seen = set()
+        for symbol in GROUPS["all"]:
+            base, quote = symbol[:3], symbol[3:6]
+            assert (quote, base) not in seen, f"{symbol} duplicates its own inverse"
+            seen.add((base, quote))
+
+    def test_groups_partition_the_registry(self):
+        combined = set(GROUPS["majors"]) | set(GROUPS["crosses"]) | set(
+            GROUPS["exotics"]) | set(GROUPS["metals"])
+        assert combined == set(GROUPS["all"]) == set(REGISTRY)
+
+    def test_forint_pairs_use_the_big_pip_like_yen_does(self):
+        """USDHUF quotes to two decimals. Treating it as 0.0001 sizes it 100x wrong."""
+        assert get_instrument("USDHUF").pip_size == 0.01
+        assert get_instrument("EURHUF").digits == 3
+
+    def test_gold_is_not_quoted_or_sized_like_a_currency_pair(self):
+        gold = get_instrument("XAUUSD")
+        assert gold.pip_size == 0.01, "a gold pip is a cent, not a hundredth of one"
+        assert gold.contract_size == 100.0, "a gold lot is 100 ounces, not 100,000"
+        assert gold.is_metal
+
+    def test_silver_has_its_own_conventions_again(self):
+        silver = get_instrument("XAGUSD")
+        assert silver.contract_size == 5_000.0
+        assert silver.pip_size == 0.001
+
+    def test_pairs_carry_the_sessions_they_are_liquid_in(self):
+        assert "london" in get_instrument("EURGBP").peak_sessions
+        assert "tokyo" in get_instrument("AUDJPY").peak_sessions
+        assert set(get_instrument("GBPJPY").peak_sessions) >= {"tokyo", "london"}
+
+    def test_every_instrument_describes_itself_in_words(self):
+        assert get_instrument("EURUSD").describe() == "euro against US dollar"
+        assert get_instrument("XAUUSD").describe() == "gold priced in US dollar"
+
+    def test_currency_lookup_falls_back_to_the_code(self):
+        assert currency_name("EUR") == "euro"
+        assert currency_name("ZZZ") == "ZZZ"
+
+    def test_pairs_with_a_currency_finds_both_legs(self):
+        found = pairs_with_currency("JPY")
+        assert "USDJPY" in found and "GBPJPY" in found
+        assert "EURGBP" not in found
+
+
+class TestSymbolGroups:
+    def test_a_group_name_expands_to_its_members(self):
+        assert expand_symbols(["majors"]) == list(GROUPS["majors"])
+
+    def test_groups_and_pairs_can_be_mixed(self):
+        expanded = expand_symbols(["majors", "XAUUSD"])
+        assert expanded[-1] == "XAUUSD"
+        assert "EURUSD" in expanded
+
+    def test_duplicates_are_dropped_but_order_is_kept(self):
+        expanded = expand_symbols(["EURUSD", "majors", "eurusd"])
+        assert expanded[0] == "EURUSD"
+        assert expanded.count("EURUSD") == 1
+
+    def test_all_is_the_whole_registry(self):
+        assert set(expand_symbols(["all"])) == set(REGISTRY)
+
+    def test_separators_are_normalised_inside_a_group_list(self):
+        assert expand_symbols(["eur/usd", "gbp_usd"]) == ["EURUSD", "GBPUSD"]
+
+    def test_config_accepts_a_group_name_where_a_symbol_goes(self, tmp_path):
+        path = tmp_path / "c.toml"
+        path.write_text('[data]\nsymbols = ["majors", "XAUUSD"]\n')
+        config = load_config(path)
+        assert config.data.symbols == ["majors", "XAUUSD"]
+        assert len(config.data.resolved_symbols) == 8
+
+    def test_config_rejects_something_that_is_neither(self, tmp_path):
+        path = tmp_path / "c.toml"
+        path.write_text('[data]\nsymbols = ["EUR"]\n')
+        with pytest.raises(ConfigError, match="neither a 6-letter pair nor"):
+            load_config(path)
+
+
+class TestStopBounds:
+    """The pip window a stop may sit in has to travel between instruments."""
+
+    def test_majors_and_crosses_are_unchanged(self, config):
+        for symbol in ("EURUSD", "GBPJPY", "AUDNZD"):
+            inst = get_instrument(symbol)
+            assert inst.stop_scale == 1.0
+            assert stop_bounds(inst, config) == (
+                config.risk.min_stop_pips, config.risk.max_stop_pips
+            )
+
+    def test_gold_gets_a_window_it_can_actually_use(self, config):
+        """An unscaled 60-pip ceiling is 60 cents — a fraction of one gold bar."""
+        low, high = stop_bounds(get_instrument("XAUUSD"), config)
+        assert high > config.risk.max_stop_pips * 10
+        assert low < high
+
+    def test_a_wide_exotic_is_scaled_too(self, config):
+        _, high = stop_bounds(get_instrument("USDZAR"), config)
+        assert high > config.risk.max_stop_pips
+
+    def test_the_scale_only_ever_widens_the_window(self, config):
+        for inst in REGISTRY.values():
+            low, high = stop_bounds(inst, config)
+            assert low >= config.risk.min_stop_pips
+            assert high >= config.risk.max_stop_pips
 
 
 class TestConfig:

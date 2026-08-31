@@ -18,7 +18,7 @@ import pytest
 
 from trading_bot.config import load_config
 from trading_bot.web import api
-from trading_bot.web.api import ApiError, dispatch
+from trading_bot.web.api import MAX_SCAN_SYMBOLS, ApiError, dispatch
 from trading_bot.web.server import STATIC_DIR, build_server
 
 from test_backtest import make_signal
@@ -102,11 +102,27 @@ class TestScan:
         assert body["results"][0]["status"] == "error"
 
     def test_symbol_limit(self, cfg):
+        """The cap still bites — it just sits above the registry now.
+
+        It used to be 20, which predated the instrument registry growing to 64
+        pairs and the shipped config defaulting to "all". A scan of the whole
+        universe is a legitimate request, so the limit was raised to sit just
+        above it rather than blocking the default configuration.
+        """
         status, body = dispatch(
-            "/api/scan", "GET", {"symbols": ",".join(f"SYM{i}" for i in range(25))}, cfg
+            "/api/scan", "GET",
+            {"symbols": ",".join(f"SYM{i}" for i in range(MAX_SCAN_SYMBOLS + 5))}, cfg,
         )
         assert status == 400
         assert "too many symbols" in body["error"]
+
+    def test_a_whole_group_is_under_the_cap(self, cfg):
+        """"all" must be scannable from the browser, not just the terminal."""
+        status, body = dispatch(
+            "/api/scan", "GET", {"source": "synthetic", "symbols": "majors", "chart": "0"}, cfg
+        )
+        assert status == 200
+        assert len(body["results"]) == 7
 
     def test_unknown_source(self, cfg):
         status, body = dispatch("/api/scan", "GET", {"source": "carrier-pigeon"}, cfg)

@@ -1,6 +1,6 @@
 # How testing is conducted
 
-433 tests, no network, fully deterministic, ~25 seconds.
+568 tests, no network, fully deterministic, ~38 seconds.
 
 ```bash
 make test                              # everything
@@ -31,6 +31,9 @@ There are four such ways, and they map directly onto the test files:
 | **Optimistic fills** | Assumes the good outcome when the bar is ambiguous | `test_backtest.py` |
 | **Small-sample bravado** | Reports 7-from-8 as an 87% win rate | `test_metrics.py` |
 | **Sizing on a hoped edge** | Bets Kelly on a rate the sample cannot support | `test_risk_analysis.py` |
+| **Selection** | Ranks sixty pairs and sells the luckiest as an edge | `test_pairs.py` |
+| **Replay as record** | Presents backtested history as a track record | `test_forecast.py` |
+| **Correlation blindness** | Counts four euro longs as four independent bets | `test_exposure.py` |
 
 ## Full inventory
 
@@ -51,7 +54,29 @@ There are four such ways, and they map directly onto the test files:
 | `test_precompute.py` | 7 | Cached and uncached evaluation produce identical signals |
 | `test_edge.py` | 20 | Edge over chance; a planned ratio cannot manufacture one |
 | `test_limits.py` | 22 | Daily-loss and drawdown breakers; advisory, never blocking |
-| **Total** | **433** | |
+| `test_playbook.py` | 26 | The guidance printed with every signal; the near-miss explanation |
+| `test_forecast.py` | 22 | Predictions, deadlines, settlement, **the forward record** |
+| `test_clock.py` | 21 | Local-time rendering; session windows in the reader's own clock |
+| `test_pairs.py` | 18 | Win rate by pair, **the multiple-comparison correction** |
+| `test_exposure.py` | 15 | Netted currency exposure; the module warns and never acts |
+| **Total** | **568** | |
+
+### The three failures the wider universe introduced
+
+Scanning 64 instruments rather than 3 creates failure modes the smaller tool could
+not have had, and each has a test pinning it:
+
+- **Selection.** Rank sixty win rates and the top row is by construction the luckiest
+  row. `test_pairs.py` asserts that intervals widen with the number of pairs inspected,
+  that a pair below the minimum sample never earns a verdict however good it looks, and
+  that a losing pair can never be ranked above a profitable one.
+- **Replay sold as record.** `test_forecast.py` asserts directly that a backtest
+  producing trades adds *nothing* to the forward scoreboard, and that a prediction with
+  no resolution yet stays open rather than being force-closed at whatever price
+  happened to be showing.
+- **Correlation.** `test_exposure.py` asserts the netting arithmetic, and that the
+  module never removes a signal from the caller's list — it warns and suggests, and
+  every signal left out of a suggestion comes back with the reason.
 
 ---
 
@@ -213,8 +238,19 @@ errors and horizontal overflow. That pass caught two real defects:
 2. **Level labels were distorted.** The chart stretches non-uniformly to fill its
    column, which warped SVG text. Prices moved to an HTML legend.
 
-Neither would have been caught by a passing test suite. If you change the UI,
-look at it.
+A third was caught the same way when the Pairs view was added:
+
+3. **A single winning trade wore a `TRADE IT` badge.** With one trade and no loser
+   there is no *realised* ratio, so the chance baseline fell back to the planned one —
+   near 11% for a distant target — which one win clears. The expectancy bound did not
+   catch it either: `mean_interval` returned a zero-width interval `(mean, mean)` for a
+   sample of one, which passes every lower-bound test in the codebase. It now returns
+   an unbounded interval, and a verdict requires the configured minimum sample.
+   `test_pairs.py::TestSmallSamples` and `test_metrics.py::TestMeanInterval` pin both
+   halves.
+
+None of the three would have been caught by a passing test suite. If you change the
+UI, look at it.
 
 ---
 

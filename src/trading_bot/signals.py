@@ -10,9 +10,10 @@ where the risk-to-reward floor is enforced.
 
 from __future__ import annotations
 
+from .clock import Clock
 from .config import Config
 from .errors import RiskError
-from .instruments import Instrument, pips_between
+from .instruments import Instrument, currency_name, pips_between
 from .models import Direction, Reason, Signal, Timeframe
 from .risk import build_stop_target, enforce_rr, position_size, structural_stop
 from .sessions import session_label
@@ -123,33 +124,107 @@ def _fmt(price: float, digits: int) -> str:
     return f"{price:.{digits}f}"
 
 
-def format_signal(signal: Signal, instrument: Instrument, width: int = 74) -> str:
+def plain_english(signal: Signal, instrument: Instrument) -> list[str]:
+    """The trade in sentences, before any of it is in jargon.
+
+    Someone who has never placed a forex trade should be able to read this block
+    alone and know what is being suggested and what it costs to be wrong.
+    """
+    d = instrument.digits
+    verb = "Buy" if signal.direction is Direction.LONG else "Sell"
+    base = currency_name(instrument.base)
+    quote = currency_name(instrument.quote)
+    expect = "rise" if signal.direction is Direction.LONG else "fall"
+    reward = signal.risk_amount * signal.risk_reward
+
+    return [
+        "  IN ONE LINE",
+        f"    {verb} the {base} against the {quote} at around {_fmt(signal.entry, d)},",
+        f"    because it looks likely to {expect} to {_fmt(signal.take_profit, d)}.",
+        f"    You are risking {signal.risk_amount:,.2f} {signal.account_currency} to make "
+        f"{reward:,.2f} {signal.account_currency}.",
+        f"    If it reaches {_fmt(signal.stop_loss, d)} instead, you lose the "
+        f"{signal.risk_amount:,.2f} and the trade is over.",
+        f"    That is the entire downside — there is no way to lose more than that on this",
+        f"    trade, provided you place the stop loss at the same time as the entry.",
+    ]
+
+
+def format_signal(
+    signal: Signal,
+    instrument: Instrument,
+    config: Config | None = None,
+    clock: Clock | None = None,
+    prediction=None,
+    width: int = 78,
+    detail: str = "full",
+) -> str:
     """Render the human-readable 'what to do' card.
 
     Deliberately plain text: this output gets pasted into notes, journals and
     chat, and it should survive all of them.
+
+    ``detail="full"`` is the default because the product is advice, not a price
+    quote — the reader is told how to place it, when to watch it, what would
+    make it wrong, and what to do afterwards. ``detail="brief"`` drops the
+    coaching for someone who has read it before.
     """
+    from .playbook import (
+        aftercare,
+        contingencies,
+        invalidation_plan,
+        management_plan,
+        order_ticket,
+        timing_plan,
+    )
+
+    config = config or Config()
+    clock = clock or config.clock
     d = instrument.digits
     arrow = "BUY " if signal.direction is Direction.LONG else "SELL"
     bar = "=" * width
     dash = "-" * width
+    reward = signal.risk_amount * signal.risk_reward
 
     lines = [
         bar,
         f"  {arrow} {signal.symbol}   [{signal.grade}]  confidence {signal.confidence:.0%}"
         f"   {signal.risk_reward:.1f}R",
-        f"  {signal.timeframe.name} - {signal.issued_at.strftime('%Y-%m-%d %H:%M UTC')}"
+        f"  {instrument.describe()}",
+        f"  {signal.timeframe.name} - {clock.stamp(signal.issued_at)}"
         f" - {session_label(signal.issued_at)}",
         bar,
         "",
+    ]
+
+    if detail == "full":
+        lines += plain_english(signal, instrument)
+        lines.append("")
+
+    lines += [
         "  WHAT TO DO",
         f"    Entry        {_fmt(signal.entry, d)}   (at or near this price)",
         f"    Stop loss    {_fmt(signal.stop_loss, d)}   ({signal.risk_pips:.1f} pips risk)",
         f"    Take profit  {_fmt(signal.take_profit, d)}   ({signal.reward_pips:.1f} pips reward)",
         f"    Size         {signal.position_lots:.2f} lots ({signal.position_units:,.0f} units)",
         f"    Risking      {signal.risk_amount:,.2f} {signal.account_currency}"
-        f"  to make  {signal.risk_amount * signal.risk_reward:,.2f} {signal.account_currency}",
+        f"  to make  {reward:,.2f} {signal.account_currency}",
         "",
+    ]
+
+    if prediction is not None:
+        from .forecast import format_prediction
+
+        lines += format_prediction(prediction, clock)
+        lines.append("")
+
+    if detail == "full":
+        lines += order_ticket(signal, instrument, config)
+        lines.append("")
+        lines += timing_plan(signal, instrument, clock)
+        lines.append("")
+
+    lines += [
         dash,
         f"  WHY  ({signal.score:.0f} of {signal.max_score:.0f} confluence points)",
     ]
@@ -157,10 +232,22 @@ def format_signal(signal: Signal, instrument: Instrument, width: int = 74) -> st
         lines.append(f"    + {reason.detail} (+{reason.weight:.0f})")
 
     if signal.warnings:
+        from .playbook import wrap
+
         lines.append("")
         lines.append("  CHECK BEFORE YOU TAKE IT")
         for warning in signal.warnings:
-            lines.append(f"    ! {warning}")
+            lines += wrap(warning, indent="      ", first="    ! ")
+
+    if detail == "full":
+        for block in (
+            invalidation_plan(signal, instrument, config),
+            management_plan(signal, config, clock),
+            contingencies(signal, instrument, config),
+            aftercare(signal, config),
+        ):
+            lines.append("")
+            lines += block
 
     lines += [
         "",
@@ -184,10 +271,11 @@ def format_signal_compact(signal: Signal, instrument: Instrument) -> str:
 
 
 def no_signal_message(symbol: str, timeframe: str, best_fraction: float | None = None) -> str:
-    """What to print when nothing qualifies.
+    """What to print when nothing qualifies, in one line.
 
     'No setup' is a real answer and should read like one. A tool that never says
-    no is a tool that is guessing.
+    no is a tool that is guessing. The long form — which checks passed, which
+    failed, and what would have to change — lives in ``playbook.explain_no_signal``.
     """
     base = f"{symbol:<8} no setup on {timeframe}"
     if best_fraction is not None:

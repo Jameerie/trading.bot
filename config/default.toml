@@ -19,6 +19,18 @@ max_concurrent_risk_pct = 3.0
 # the floor is the point of the system, not a default to tune away.
 min_risk_reward = 4.0
 # A target further than this is unlikely to fill and would flatter the backtest.
+#
+# This one is worth sweeping, and `calibrate --ceiling` does it. On the bundled
+# EURUSD/GBPUSD/USDJPY samples, lowering it from 20 to 10 more than doubled
+# out-of-sample expectancy (+0.24R to +0.57R per trade) because targets at 12:1
+# were being planned and 2.5:1 was being paid — the difference expiring on the
+# time limit rather than at a barrier.
+#
+# It is left at 20 anyway. Across a much wider set of series the ordering
+# reversed and 20 came out ahead on total return, so the two measurements
+# disagree and the sample that favoured 10 was the smaller one. Changing a
+# default on the strength of the weaker of two conflicting measurements is
+# exactly the curve-fitting this project refuses. Sweep it on your own data.
 max_risk_reward = 20.0
 stop_atr_multiple = 1.5
 min_stop_pips = 8.0
@@ -30,7 +42,16 @@ structure_buffer_atr = 0.25
 [strategy]
 name = "trend_pullback"
 # The quality dial: the fraction of available confluence a setup must score.
-# Run `calibrate` on your own data before changing this.
+#
+# This stayed at 0.70 because it was measured, not because nobody looked. Swept
+# out-of-sample across 0.60-0.85 on the bundled samples, raising it costs trades
+# without buying expectancy — 0.70 returned +0.57R per trade, 0.75 returned
+# +0.57R on fewer, and 0.85 fell to +0.25R on a third of the sample. Turning this
+# up feels like more discipline and measures as less edge.
+#
+# Every one of those samples was under 30 trades, so none of it is proof. Run
+# `calibrate` on your own data before changing it, and read the trade count
+# beside every win rate.
 min_confluence = 0.70
 ema_fast = 21
 ema_slow = 50
@@ -54,7 +75,14 @@ entry_expiry_bars = 3
 
 [data]
 source = "csv"
-symbols = ["EURUSD", "GBPUSD", "USDJPY"]
+# Symbols may be individual pairs or group names, and the two can be mixed.
+# Groups: majors (7 USD pairs), crosses (21), exotics (30), metals (6),
+#         fx (all 58 currency pairs), core (majors + crosses + gold), all (64).
+# "all" is the default because a setup you never looked at is a setup you never
+# had. Expect most exotics to be rejected by the R:R floor rather than by the
+# strategy — a 40-pip spread eats a 1:4 trade before it starts, and the floor
+# saying so is the floor working.
+symbols = ["all"]
 timeframe = "H1"
 htf_timeframe = "H4"
 csv_dir = "data/samples"
@@ -62,6 +90,18 @@ provider = "twelvedata"
 # The key is read from this environment variable. Never put a key in this file.
 api_key_env = "TRADING_BOT_API_KEY"
 lookback_bars = 500
+
+[display]
+# Display only. Nothing in the decision path reads this: candles, sessions and
+# the journal are UTC everywhere, and stay that way. Every time shown to you is
+# converted through this zone, and session windows are printed in it too, so
+# "London opens at 08:00" means 08:00 on your clock.
+# Africa/Lagos is UTC+1 with no daylight saving, so these windows never shift.
+timezone = "Africa/Lagos"
+# "full" prints the whole playbook with every signal: how to place the order,
+# when to watch it, what would make it wrong, what to do afterwards.
+# "brief" prints the prices and the reasoning only.
+detail = "full"
 
 [limits]
 # Account-level circuit breakers, in percent of balance. These warn on the signal

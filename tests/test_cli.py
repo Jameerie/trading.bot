@@ -114,6 +114,24 @@ class TestCalibrate:
         assert main(["calibrate", "--csv", str(sample_csv), "--split", "0"]) == 0
         assert "full series" in capsys.readouterr().out
 
+    def test_it_points_at_the_other_dial(self, sample_csv, capsys):
+        """Confluence is not the only knob, and the sweep should say so."""
+        main(["calibrate", "--csv", str(sample_csv)])
+        assert "--ceiling" in capsys.readouterr().out
+
+    def test_the_ceiling_sweep_shows_planned_against_realised(self, sample_csv, capsys):
+        """The two columns that reveal a target the market never reaches."""
+        assert main(["calibrate", "--csv", str(sample_csv), "--ceiling"]) == 0
+        out = capsys.readouterr().out
+        assert "Reward-ceiling sweep" in out
+        assert "planned" in out and "realised" in out and "expired" in out
+
+    def test_the_ceiling_sweep_warns_that_picking_a_row_is_a_fit(self, sample_csv, capsys):
+        main(["calibrate", "--csv", str(sample_csv), "--ceiling"])
+        out = capsys.readouterr().out
+        assert "fit to this data" in out
+        assert "confirm it on a different period" in out
+
 
 class TestJournalCommand:
     def test_empty_journal(self, tmp_path, capsys):
@@ -227,3 +245,69 @@ class TestShippedConfig:
     def test_scan_runs_with_the_shipped_config(self, capsys):
         code = main(["--config", str(CONFIG), "scan", "--source", "synthetic", "--no-journal"])
         assert code == 0
+
+    @pytest.mark.skipif(not CONFIG.exists(), reason="repo config not present")
+    def test_the_shipped_config_scans_the_whole_universe(self, capsys):
+        """`symbols = ["all"]` must expand, not be handed to a data source verbatim."""
+        from trading_bot.config import load_config
+        from trading_bot.instruments import REGISTRY
+
+        assert load_config(CONFIG).data.resolved_symbols == list(REGISTRY)
+
+    @pytest.mark.skipif(not CONFIG.exists(), reason="repo config not present")
+    def test_the_shipped_config_still_honours_the_project_floor(self):
+        from trading_bot.config import ABSOLUTE_MIN_RR, load_config
+
+        assert load_config(CONFIG).risk.min_risk_reward >= ABSOLUTE_MIN_RR
+
+
+class TestSymbolGroupsThroughTheCli:
+    """A group name in the config must not break the single-symbol commands.
+
+    ``symbols = ["all"]`` is the shipped default. Commands that take "the first
+    configured symbol" were reading it literally and asking the data source for a
+    pair called "all" — which `make demo` caught and the suite did not.
+    """
+
+    def _config(self, tmp_path, journal):
+        path = tmp_path / "c.toml"
+        path.write_text(
+            f'journal_path = "{journal}"\n\n'
+            '[data]\nsource = "synthetic"\nsymbols = ["majors"]\n'
+        )
+        return str(path)
+
+    def test_backtest_resolves_the_group_to_a_real_pair(self, tmp_path, capsys):
+        config = self._config(tmp_path, tmp_path / "j.jsonl")
+        assert main(["--config", config, "backtest", "--bars", "400"]) == 0
+        out = capsys.readouterr().out
+        assert "EURUSD" in out
+        assert "unrecognised symbol" not in out
+
+    def test_calibrate_resolves_the_group_too(self, tmp_path, capsys):
+        config = self._config(tmp_path, tmp_path / "j.jsonl")
+        assert main(["--config", config, "calibrate", "--bars", "400", "--split", "0"]) == 0
+        assert "EURUSD" in capsys.readouterr().out
+
+    def test_scan_expands_a_group_given_on_the_command_line(self, tmp_path, capsys):
+        config = self._config(tmp_path, tmp_path / "j.jsonl")
+        main(["--config", config, "scan", "--symbols", "majors", "--no-journal",
+              "--no-base-rate", "--brief"])
+        out = capsys.readouterr().out
+        assert "7 instrument(s) scanned" in out
+
+    def test_pairs_reports_every_instrument_in_the_group(self, tmp_path, capsys):
+        config = self._config(tmp_path, tmp_path / "j.jsonl")
+        assert main(["--config", config, "pairs", "--symbols", "majors",
+                     "--bars", "400", "--split", "0"]) == 0
+        out = capsys.readouterr().out
+        assert "WIN RATE BY PAIR" in out
+        for symbol in ("EURUSD", "GBPUSD", "USDJPY"):
+            assert symbol in out
+
+    def test_forecast_runs_on_an_empty_journal(self, tmp_path, capsys):
+        config = self._config(tmp_path, tmp_path / "j.jsonl")
+        assert main(["--config", config, "forecast"]) == 0
+        out = capsys.readouterr().out
+        assert "FORWARD RECORD" in out
+        assert "backtest cannot add" in out

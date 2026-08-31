@@ -6,14 +6,19 @@ earned, so it gets tested hard.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from trading_bot.metrics import (
+    Interval,
     compute_metrics,
     equity_curve,
     evaluate_gate,
+    family_confidence,
     longest_streak,
     max_drawdown,
+    mean_interval,
     wilson_interval,
     _z_for,
 )
@@ -179,3 +184,60 @@ class TestQualityGate:
         assert metrics.win_rate == pytest.approx(0.85)
         assert not gate.passed
         assert gate.verdict == "UNPROVEN"
+
+
+class TestMeanInterval:
+    """Win rate has Wilson; expectancy needs a bound of its own."""
+
+    def test_a_single_observation_is_unbounded_not_precise(self):
+        """The defect this pins: (mean, mean) let one trade pass any test put to it.
+
+        A pair with one winning trade rendered as TRADE IT, because a zero-width
+        interval around +4.5R cleared every lower-bound check in the codebase.
+        One observation says nothing about the precision of a mean, and the
+        interval now says so.
+        """
+        interval = mean_interval([4.0])
+        assert math.isinf(interval.low) and interval.low < 0
+        assert math.isinf(interval.high)
+
+    def test_an_empty_sample_is_zero_width_at_zero(self):
+        assert mean_interval([]) == Interval(0.0, 0.0, 0.95)
+
+    def test_the_interval_brackets_the_mean(self):
+        values = [4.0, -1.0, -1.0, -1.0, 4.0, -1.0, -1.0, -1.0]
+        interval = mean_interval(values)
+        mean = sum(values) / len(values)
+        assert interval.low < mean < interval.high
+
+    def test_more_data_narrows_it(self):
+        few = mean_interval([4.0, -1.0] * 5)
+        many = mean_interval([4.0, -1.0] * 50)
+        assert (many.high - many.low) < (few.high - few.low)
+
+    def test_it_is_not_clamped_to_a_proportion(self):
+        """R-multiples are not probabilities; a negative bound is meaningful."""
+        assert mean_interval([-1.0] * 10 + [-0.9]).low < 0
+
+
+class TestFamilyConfidence:
+    """Looking at sixty pairs and picking one is not a 95% question any more."""
+
+    def test_one_comparison_changes_nothing(self):
+        assert family_confidence(0.95, 1) == 0.95
+        assert family_confidence(0.95, 0) == 0.95
+
+    def test_more_comparisons_demand_a_stricter_standard(self):
+        assert family_confidence(0.95, 60) > family_confidence(0.95, 10) > 0.95
+
+    def test_it_stays_below_certainty(self):
+        assert family_confidence(0.95, 1000) < 1.0
+
+    def test_sidak_is_the_stated_formula(self):
+        assert family_confidence(0.95, 4) == pytest.approx(0.95 ** 0.25)
+
+    def test_the_corrected_interval_is_wider(self):
+        raw = wilson_interval(8, 30, 0.95)
+        corrected = wilson_interval(8, 30, family_confidence(0.95, 30))
+        assert corrected.low < raw.low
+        assert corrected.high > raw.high

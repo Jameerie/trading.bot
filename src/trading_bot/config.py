@@ -12,7 +12,9 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .clock import DEFAULT_ZONE, Clock
 from .errors import ConfigError
+from .instruments import expand_symbols, group_names, normalise_symbol
 
 # The product rule from the README. Config may raise this floor but never lower it.
 ABSOLUTE_MIN_RR = 4.0
@@ -137,11 +139,57 @@ class DataConfig:
             raise ConfigError("data.symbols must list at least one symbol")
         if self.lookback_bars < 60:
             raise ConfigError("data.lookback_bars below 60 leaves indicators unwarmed")
+        for entry in self.symbols:
+            text = str(entry).strip()
+            if text.lower() in group_names():
+                continue
+            if len(normalise_symbol(text)) < 6:
+                raise ConfigError(
+                    f"data.symbols entry {entry!r} is neither a 6-letter pair nor one of "
+                    f"the groups {', '.join(group_names())}"
+                )
+
+    @property
+    def resolved_symbols(self) -> list[str]:
+        """Concrete symbols to scan, with group keywords expanded.
+
+        ``symbols = ["all"]`` is the whole registry; ``["majors", "XAUUSD"]``
+        works too. Everything downstream reads this rather than ``symbols``, so
+        a group name is usable anywhere a pair is.
+        """
+        return expand_symbols(self.symbols)
 
     @property
     def api_key(self) -> str | None:
         """Read the provider key from the environment. Never stored in the file."""
         return os.environ.get(self.api_key_env)
+
+
+@dataclass(frozen=True)
+class DisplayConfig:
+    """How output is presented to the human reading it.
+
+    ``timezone`` is a display concern only. Nothing in the decision path reads
+    it — sessions, candles and the journal stay in UTC — but every time shown to
+    the user is converted through it, because a signal timestamped 13:00 UTC is
+    useless to someone whose day is measured in WAT.
+    """
+
+    timezone: str = DEFAULT_ZONE
+    detail: str = "full"
+
+    def validate(self) -> None:
+        if self.detail not in ("full", "brief"):
+            raise ConfigError(
+                f"display.detail must be 'full' or 'brief'; got {self.detail!r}"
+            )
+        if not self.timezone.strip():
+            raise ConfigError("display.timezone must not be empty")
+
+    @property
+    def clock(self) -> Clock:
+        """The clock every renderer should use."""
+        return Clock(self.timezone)
 
 
 @dataclass(frozen=True)
@@ -206,6 +254,7 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     target: TargetConfig = field(default_factory=TargetConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
+    display: DisplayConfig = field(default_factory=DisplayConfig)
     journal_path: str = "reports/journal.jsonl"
 
     def validate(self) -> "Config":
@@ -216,7 +265,13 @@ class Config:
         self.data.validate()
         self.target.validate()
         self.limits.validate()
+        self.display.validate()
         return self
+
+    @property
+    def clock(self) -> Clock:
+        """Shortcut to the display clock — every renderer needs it."""
+        return self.display.clock
 
 
 def _build(section: dict, cls, name: str):
@@ -253,7 +308,7 @@ def load_config(path: str | Path | None = None) -> Config:
 
     top_unknown = set(raw) - {
         "account", "risk", "strategy", "backtest", "data", "target", "limits",
-        "journal_path",
+        "display", "journal_path",
     }
     if top_unknown:
         raise ConfigError(f"unknown top-level section(s): {', '.join(sorted(top_unknown))}")
@@ -266,5 +321,6 @@ def load_config(path: str | Path | None = None) -> Config:
         data=_build(raw.get("data", {}), DataConfig, "data"),
         target=_build(raw.get("target", {}), TargetConfig, "target"),
         limits=_build(raw.get("limits", {}), LimitsConfig, "limits"),
+        display=_build(raw.get("display", {}), DisplayConfig, "display"),
         journal_path=raw.get("journal_path", "reports/journal.jsonl"),
     ).validate()

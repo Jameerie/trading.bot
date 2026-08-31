@@ -57,6 +57,19 @@ class PositionSize:
         )
 
 
+def stop_bounds(instrument: Instrument, config: Config) -> tuple[float, float]:
+    """The pip window a stop may sit in, normalised for this instrument.
+
+    The configured bounds are written in major-pair pips. Gold's pip is twenty
+    times smaller relative to its price, so applying the same number to it would
+    clamp every gold stop into a fraction of one bar. ``Instrument.stop_scale``
+    converts the window; it is 1.0 for every pair quoted like a major, so their
+    behaviour is unchanged.
+    """
+    scale = instrument.stop_scale
+    return config.risk.min_stop_pips * scale, config.risk.max_stop_pips * scale
+
+
 def structural_stop(
     direction: Direction,
     entry: float,
@@ -76,7 +89,7 @@ def structural_stop(
     raw = structure_level - buffer if direction is Direction.LONG else structure_level + buffer
 
     distance_pips = pips_between(instrument, entry, raw)
-    floor, ceiling = config.risk.min_stop_pips, config.risk.max_stop_pips
+    floor, ceiling = stop_bounds(instrument, config)
     clamped = min(max(distance_pips, floor), ceiling)
 
     if not math.isclose(clamped, distance_pips, rel_tol=1e-9):
@@ -91,10 +104,8 @@ def atr_stop(
 ) -> float:
     """Fallback stop for when no clean structure level is available."""
     offset = atr_value * config.risk.stop_atr_multiple
-    distance_pips = min(
-        max(offset / instrument.pip_size, config.risk.min_stop_pips),
-        config.risk.max_stop_pips,
-    )
+    floor, ceiling = stop_bounds(instrument, config)
+    distance_pips = min(max(offset / instrument.pip_size, floor), ceiling)
     price_offset = price_from_pips(instrument, distance_pips)
     raw = entry - price_offset if direction is Direction.LONG else entry + price_offset
     return round_price(instrument, raw)
