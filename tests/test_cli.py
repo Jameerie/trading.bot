@@ -58,8 +58,24 @@ class TestScan:
 
     def test_missing_csv_is_a_clean_message_not_a_traceback(self, capsys):
         code = main(["scan", "--source", "csv", "--symbols", "ZZZZZZ", "--no-journal"])
+        out = capsys.readouterr().out
         assert code == 0
-        assert "could not scan" in capsys.readouterr().out
+        assert "Traceback" not in out
+        # Named, not silently dropped, and told what to run about it.
+        assert "ZZZZZZ" in out
+        assert "no H1 data" in out
+        assert "data --fetch --only-missing" in out
+
+    def test_missing_symbols_are_reported_once_not_once_each(self, capsys):
+        """Sixty repetitions of one sentence is how a fixable setup reads as a bug."""
+        main([
+            "scan", "--source", "csv", "--no-journal",
+            "--symbols", "EURNOK", "EURDKK", "EURPLN", "EURCZK", "EURHUF",
+        ])
+        out = capsys.readouterr().out
+        assert out.count("data --fetch --only-missing") == 1
+        for symbol in ("EURNOK", "EURDKK", "EURPLN", "EURCZK", "EURHUF"):
+            assert symbol in out
 
     def test_journal_is_written_when_enabled(self, tmp_path, capsys):
         config = tmp_path / "c.toml"
@@ -151,6 +167,44 @@ class TestDataCommand:
     def test_warns_that_synthetic_data_is_not_a_market(self, tmp_path, capsys):
         main(["data", "--generate", "--symbols", "EURUSD", "--bars", "100", "--out", str(tmp_path)])
         assert "not a market" in capsys.readouterr().out
+
+    def test_only_missing_fills_the_gaps_and_leaves_the_rest(self, tmp_path, capsys):
+        main(["data", "--generate", "--symbols", "EURUSD", "--bars", "100", "--out", str(tmp_path)])
+        before = (tmp_path / "EURUSD_H1.csv").read_bytes()
+        capsys.readouterr()
+
+        code = main([
+            "data", "--generate", "--only-missing", "--symbols", "EURUSD", "GBPUSD",
+            "--bars", "150", "--out", str(tmp_path),
+        ])
+        out = capsys.readouterr().out
+        assert code == 0
+        assert (tmp_path / "EURUSD_H1.csv").read_bytes() == before
+        assert (tmp_path / "GBPUSD_H1.csv").exists()
+        assert "1 written, 1 already present" in out
+
+    def test_a_whole_group_can_be_filled_at_once(self, tmp_path, capsys):
+        """The command the scan tells you to run has to cover what the scan asked for."""
+        code = main([
+            "data", "--generate", "--symbols", "majors", "--bars", "80", "--out", str(tmp_path),
+        ])
+        assert code == 0
+        assert (tmp_path / "EURUSD_H1.csv").exists()
+        assert (tmp_path / "USDCAD_H1.csv").exists()
+        assert len(list(tmp_path.glob("*_H1.csv"))) == 7
+
+    def test_fetch_without_a_key_is_a_clean_message_naming_the_alternative(self, capsys):
+        """No network is touched: the provider refuses to build without a key."""
+        code = main(["data", "--fetch", "--symbols", "EURNOK"])
+        assert code == 2
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "TRADING_BOT_API_KEY" in err
+        assert "data --generate" in err
+
+    def test_nothing_to_do_names_every_mode(self, capsys):
+        assert main(["data"]) == 1
+        assert "--fetch, --generate or --inspect" in capsys.readouterr().out
 
     def test_inspect(self, sample_csv, capsys):
         assert main(["data", "--inspect", str(sample_csv)]) == 0

@@ -152,7 +152,7 @@ than restating the signature. Match the surrounding file.
 ## 4. Commands
 
 ```bash
-make test            # pytest suite (433 tests)
+make test            # pytest suite (609 tests)
 make lint            # compile-check + import-clean check
 make demo            # end-to-end run on bundled sample data
 

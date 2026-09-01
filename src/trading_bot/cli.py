@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 from datetime import datetime
 from pathlib import Path
 
@@ -17,9 +18,10 @@ from .backtest import run_backtest, split_backtest
 from .calibrate import format_ceiling_sweep, format_sweep, sweep, sweep_ceiling
 from .clock import humanise_delta
 from .config import Config, load_config
-from .data.csv_source import CsvSource, load_csv, write_csv
+from .data.base import missing_symbols
+from .data.csv_source import CsvSource, fill_commands, fill_directory, load_csv
 from .data.synthetic import SyntheticSource, generate
-from .errors import TradingBotError
+from .errors import DataError, TradingBotError
 from .forecast import (
     bars_to_time,
     build_prediction,
@@ -60,6 +62,35 @@ def build_source(config: Config, override: str | None = None):
 
         return build_rest_source(config.data.provider, config.data.api_key)
     raise TradingBotError(f"unknown data source {kind!r}")
+
+
+def data_gap_lines(
+    gaps: list[str], timeframe: Timeframe, directory: Path | str,
+    indent: str = "  ", names: bool = True,
+) -> list[str]:
+    """The one paragraph to print about symbols with no file behind them.
+
+    Printed once with the whole list, not once per symbol. Sixty repetitions of
+    the same sentence is how a fixable setup problem reads as a broken program,
+    and it buries the pairs that *were* scanned underneath it.
+
+    ``names`` is off for callers whose own report already lists the pairs, so
+    the reader gets the remedy without reading the same sixty symbols twice.
+    """
+    if not gaps:
+        return []
+    lines = [""]
+    if names:
+        lines += [
+            f"{indent}{len(gaps)} instrument(s) have no {timeframe.name} data in "
+            f"{directory}, so they were not judged at all.",
+            f"{indent}Unmeasured is not the same as no setup:",
+        ]
+        lines += [f"{indent}  {chunk}" for chunk in textwrap.wrap(", ".join(gaps), width=72)]
+    lines.append(f"{indent}Fill them in one command:")
+    for command, note in fill_commands(timeframe, only_missing=True):
+        lines += [f"{indent}  {command}", f"{indent}    {note}"]
+    return lines
 
 
 def cmd_scan(args, config: Config) -> int:
@@ -184,18 +215,24 @@ def cmd_scan(args, config: Config) -> int:
         print()
 
     # ---------------------------------------------------------------- the tally
+    gaps = missing_symbols(source, symbols, timeframe)
+    gapped = set(gaps)
+    broken = [(sym, msg) for sym, msg in unavailable if sym not in gapped]
+
     print("=" * 78)
-    print(f"  {len(signals)} setup(s) found across {len(symbols)} instrument(s) scanned. "
-          f"{len(near_misses)} had none.")
-    if unavailable:
-        print(f"  {len(unavailable)} could not scan (no data): "
-              f"{', '.join(s for s, _ in unavailable[:8])}"
-              f"{' and others' if len(unavailable) > 8 else ''}")
+    print(f"  {len(signals)} setup(s) found across {len(symbols) - len(unavailable)} "
+          f"instrument(s) scanned. {len(near_misses)} had none.")
     if signals and journal is not None:
         print(f"  Recorded as predictions in {journal.path} — settle them later with:")
         print("    python -m trading_bot forecast --resolve")
     if not signals:
         print("  Nothing met the rules. No setup is a position too.")
+    # What could not be looked at goes last: it is a footnote about the data,
+    # not an answer about the market, and it must not push the answer off screen.
+    for symbol, message in broken:
+        print(f"  {symbol} could not be read: {message}")
+    for line in data_gap_lines(gaps, timeframe, getattr(source, "directory", "the data directory")):
+        print(line)
     print("=" * 78)
     return 0
 
@@ -221,6 +258,11 @@ def cmd_pairs(args, config: Config) -> int:
     split = None if args.split in (0, None) else args.split
     report = analyse_universe(candles_by_symbol, config, split=split, symbols=symbols)
     print(format_universe(report, config))
+    for line in data_gap_lines(
+        missing_symbols(source, symbols, timeframe), timeframe,
+        getattr(source, "directory", "the data directory"), indent="    ", names=False,
+    ):
+        print(line)
 
     if args.persistence:
         print()
@@ -400,22 +442,84 @@ def cmd_serve(args, config: Config) -> int:
     return 0
 
 
+def _humanise_seconds(seconds: float) -> str:
+    """'40s', '9 min': a wait a person can decide whether to sit through."""
+    return f"{seconds:.0f}s" if seconds < 90 else f"{seconds / 60:.0f} min"
+
+
+def _fill_files(source, symbols, timeframe, out_dir: Path, args, pause: float) -> int:
+    """Run one fill pass, printing each symbol as it lands.
+
+    ``pause`` is the gap between provider requests. Twelve Data's free tier
+    allows eight calls a minute and the whole registry is sixty-four of them, so
+    the default is slow on purpose: finishing in nine minutes beats being cut
+    off after the first eight pairs.
+    """
+    written: list[str] = []
+    skipped: list[str] = []
+    failed: list[tuple[str, str]] = []
+
+    for result in fill_directory(
+        source, symbols, timeframe, out_dir, args.bars,
+        only_missing=args.only_missing, pause=pause,
+    ):
+        if result.status == "written":
+            written.append(result.symbol)
+            print(f"wrote {result.bars} bars to {result.path}")
+        elif result.status == "skipped":
+            skipped.append(result.symbol)
+            print(f"skipped {result.symbol} ({result.message})")
+        else:
+            failed.append((result.symbol, result.message))
+            print(f"FAILED {result.symbol}: {result.message}")
+
+    print()
+    print(f"{len(written)} written, {len(skipped)} already present, {len(failed)} failed.")
+    if failed:
+        print("  Failed pairs are still missing and will report no data when you scan:")
+        for symbol, message in failed[:5]:
+            print(f"    {symbol}: {message}")
+        if len(failed) > 5:
+            print(f"    and {len(failed) - 5} more")
+    # A run where nothing at all landed is a failed run, whatever the exit code
+    # of the individual requests said.
+    return 0 if written or skipped else 1
+
+
 def cmd_data(args, config: Config) -> int:
     """Create or inspect candle files."""
     out_dir = Path(args.out or config.data.csv_dir)
     timeframe = Timeframe.parse(args.timeframe or config.data.timeframe)
+    symbols = expand_symbols(args.symbols or config.data.symbols)
+
+    if args.fetch:
+        try:
+            source = build_source(config, "rest")
+        except TradingBotError as exc:
+            # The dead end this command exists to get someone out of. Say the
+            # offline alternative here rather than leaving them to find it.
+            raise DataError(
+                f"{exc} To fill the directory without a key, synthetic bars for "
+                f"testing the pipeline: python -m trading_bot data --generate."
+            ) from exc
+        pending = len(CsvSource(out_dir).missing(symbols, timeframe)) if args.only_missing \
+            else len(symbols)
+        print(f"Fetching {pending} of {len(symbols)} symbol(s) at {timeframe.name} "
+              f"from {config.data.provider} into {out_dir}")
+        if args.pause > 0 and pending > 1:
+            print(f"  Pausing {args.pause:g}s between requests for the provider's rate "
+                  f"limit, about {_humanise_seconds(args.pause * (pending - 1))} in total. "
+                  f"Pass --pause 0 if your plan allows more.")
+        print()
+        return _fill_files(source, symbols, timeframe, out_dir, args, pause=args.pause)
 
     if args.generate:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        for symbol in expand_symbols(args.symbols or config.data.symbols):
-            source = SyntheticSource(seed=args.seed)
-            candles = source.fetch(symbol, timeframe, args.bars)
-            path = out_dir / f"{symbol.upper()}_{timeframe.name}.csv"
-            write_csv(path, candles)
-            print(f"wrote {len(candles)} bars to {path}")
+        code = _fill_files(
+            SyntheticSource(seed=args.seed), symbols, timeframe, out_dir, args, pause=0.0
+        )
         print("\nThis is synthetic data for testing the pipeline.")
         print("It is not a market. Never quote results from it as performance.")
-        return 0
+        return code
 
     if args.inspect:
         candles = load_csv(args.inspect)
@@ -427,7 +531,7 @@ def cmd_data(args, config: Config) -> int:
         print(f"  range {lo:.5f} - {hi:.5f}")
         return 0
 
-    print("Nothing to do. Pass --generate or --inspect PATH.")
+    print("Nothing to do. Pass --fetch, --generate or --inspect PATH.")
     return 1
 
 
@@ -541,12 +645,21 @@ def build_parser() -> argparse.ArgumentParser:
     web.set_defaults(func=cmd_serve)
 
     data = sub.add_parser("data", help="create or inspect candle files")
+    data.add_argument("--fetch", action="store_true",
+                      help="download real candles from the configured provider "
+                           "into the CSV directory (needs a provider key)")
     data.add_argument("--generate", action="store_true", help="write synthetic sample CSVs")
     data.add_argument("--inspect", metavar="PATH", help="summarise a CSV")
-    data.add_argument("--symbols", nargs="+")
+    data.add_argument("--symbols", nargs="+",
+                      help=f"symbols or group names ({groups}); defaults to the config")
     data.add_argument("--timeframe")
     data.add_argument("--bars", type=int, default=2000)
     data.add_argument("--seed", type=int, default=42)
+    data.add_argument("--only-missing", action="store_true",
+                      help="leave symbols that already have a file alone")
+    data.add_argument("--pause", type=float, default=8.0,
+                      help="seconds between provider requests; free tiers allow "
+                           "about 8 a minute (default: 8)")
     data.add_argument("--out", help="output directory")
     data.set_defaults(func=cmd_data)
 

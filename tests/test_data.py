@@ -6,8 +6,15 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from trading_bot.data.base import validate_series
-from trading_bot.data.csv_source import CsvSource, load_csv, parse_timestamp, write_csv
+from trading_bot.data.base import missing_symbols, validate_series
+from trading_bot.data.csv_source import (
+    CsvSource,
+    fill_commands,
+    fill_directory,
+    load_csv,
+    parse_timestamp,
+    write_csv,
+)
 from trading_bot.data.synthetic import SyntheticSource, generate, generate_trending
 from trading_bot.errors import DataError
 from trading_bot.models import Candle, Timeframe
@@ -131,6 +138,101 @@ class TestCsv:
     def test_source_reports_what_it_looked_for(self, tmp_path):
         with pytest.raises(DataError, match="Looked for"):
             CsvSource(tmp_path).fetch("GBPUSD", Timeframe.H1, 30)
+
+    def test_source_says_what_to_do_about_it(self, tmp_path):
+        """Naming the file it wanted is half an answer; the other half is the fix."""
+        with pytest.raises(DataError, match="data --fetch --symbols GBPUSD"):
+            CsvSource(tmp_path).fetch("GBPUSD", Timeframe.H1, 30)
+
+
+class TestMissingFiles:
+    """Which symbols have nothing on disk, asked before a single fetch is tried."""
+
+    def test_missing_lists_only_the_absent_ones_in_order(self, tmp_path):
+        write_csv(tmp_path / "EURUSD_H1.csv", generate(bars=30, seed=1))
+        source = CsvSource(tmp_path)
+        asked = ["EURNOK", "EURUSD", "XAUUSD"]
+        assert source.missing(asked, Timeframe.H1) == ["EURNOK", "XAUUSD"]
+
+    def test_missing_is_per_timeframe(self, tmp_path):
+        write_csv(tmp_path / "EURUSD_H1.csv", generate(bars=30, seed=1))
+        source = CsvSource(tmp_path)
+        assert source.missing(["EURUSD"], Timeframe.H1) == []
+        assert source.missing(["EURUSD"], Timeframe.H4) == ["EURUSD"]
+
+    @pytest.mark.parametrize("name", ["EURUSD_H1.csv", "EURUSDH1.csv", "eurusd_h1.csv"])
+    def test_every_accepted_spelling_counts_as_present(self, tmp_path, name):
+        write_csv(tmp_path / name, generate(bars=30, seed=1))
+        source = CsvSource(tmp_path)
+        assert source.missing(["EURUSD"], Timeframe.H1) == []
+        assert source.path_for("EURUSD", Timeframe.H1).name == name
+
+    def test_a_streaming_source_is_not_asked(self):
+        """Only a directory can answer this for free. An API would have to pay."""
+        assert missing_symbols(SyntheticSource(), ["EURUSD", "EURNOK"], Timeframe.H1) == []
+
+    def test_the_advice_is_defined_once(self):
+        commands = fill_commands(Timeframe.H1, only_missing=True)
+        assert [c for c, _ in commands] == [
+            "python -m trading_bot data --fetch --only-missing --timeframe H1",
+            "python -m trading_bot data --generate --only-missing --timeframe H1",
+        ]
+        # Market data first: only one of the two can tell you about a market.
+        assert "not a market" in commands[1][1]
+
+
+class TestFillDirectory:
+    def test_writes_one_file_per_symbol(self, tmp_path):
+        results = list(fill_directory(
+            SyntheticSource(), ["EURUSD", "USDJPY"], Timeframe.H1, tmp_path, bars=120
+        ))
+        assert [r.status for r in results] == ["written", "written"]
+        assert [r.bars for r in results] == [120, 120]
+        assert (tmp_path / "EURUSD_H1.csv").exists()
+        assert (tmp_path / "USDJPY_H1.csv").exists()
+
+    def test_only_missing_leaves_existing_files_untouched(self, tmp_path):
+        write_csv(tmp_path / "EURUSD_H1.csv", generate(bars=30, seed=1))
+        before = (tmp_path / "EURUSD_H1.csv").read_bytes()
+        results = list(fill_directory(
+            SyntheticSource(), ["EURUSD", "USDJPY"], Timeframe.H1, tmp_path,
+            bars=120, only_missing=True,
+        ))
+        assert [r.status for r in results] == ["skipped", "written"]
+        assert (tmp_path / "EURUSD_H1.csv").read_bytes() == before
+
+    def test_refresh_overwrites_the_file_that_backs_the_symbol(self, tmp_path):
+        """Writing the canonical name beside an odd one would leave the stale
+        file in front: ``path_for`` returns the canonical spelling first."""
+        write_csv(tmp_path / "eurusd_h1.csv", generate(bars=30, seed=1))
+        list(fill_directory(SyntheticSource(), ["EURUSD"], Timeframe.H1, tmp_path, bars=120))
+        assert not (tmp_path / "EURUSD_H1.csv").exists()
+        assert len(load_csv(tmp_path / "eurusd_h1.csv")) == 120
+
+    def test_one_failure_does_not_abandon_the_rest(self, tmp_path):
+        class Flaky:
+            def fetch(self, symbol, timeframe, limit):
+                if symbol == "EURNOK":
+                    raise DataError("provider does not carry EURNOK")
+                return generate(bars=limit, seed=3)
+
+        results = list(fill_directory(
+            Flaky(), ["EURNOK", "EURUSD"], Timeframe.H1, tmp_path, bars=90
+        ))
+        assert [r.status for r in results] == ["failed", "written"]
+        assert "does not carry" in results[0].message
+        assert (tmp_path / "EURUSD_H1.csv").exists()
+
+    def test_creates_the_directory(self, tmp_path):
+        target = tmp_path / "does" / "not" / "exist"
+        list(fill_directory(SyntheticSource(), ["EURUSD"], Timeframe.H1, target, bars=80))
+        assert (target / "EURUSD_H1.csv").exists()
+
+    def test_what_it_wrote_reads_back(self, tmp_path):
+        list(fill_directory(SyntheticSource(), ["USDJPY"], Timeframe.H1, tmp_path, bars=100))
+        candles = CsvSource(tmp_path).fetch("USDJPY", Timeframe.H1, 100)
+        assert len(candles) == 100
+        assert all(c.timestamp.tzinfo is not None for c in candles)
 
 
 class TestSynthetic:

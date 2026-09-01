@@ -17,7 +17,8 @@ from .. import __version__
 from ..backtest import run_backtest, split_backtest
 from ..calibrate import sweep
 from ..config import Config
-from ..data.csv_source import CsvSource
+from ..data.base import missing_symbols
+from ..data.csv_source import CsvSource, fill_commands
 from ..data.synthetic import SyntheticSource
 from ..errors import TradingBotError
 from ..clock import session_windows
@@ -282,8 +283,18 @@ def scan(params: dict, config: Config) -> dict:
     results = []
     signals: list[Signal] = []
     base_rates: dict = {}
+    # Asked once, before any fetch: a pair with no file is a setup problem the
+    # reader can fix in one command, not sixty separate failures to scroll past.
+    gapped = set(missing_symbols(source, wanted, timeframe))
 
     for symbol in wanted:
+        if symbol in gapped:
+            results.append({
+                "symbol": symbol,
+                "status": "no_data",
+                "message": f"no {timeframe.name} candles on file",
+            })
+            continue
         try:
             candles = source.fetch(symbol, timeframe, config.data.lookback_bars)
             evaluation = scan_latest(candles, symbol, config)
@@ -334,7 +345,8 @@ def scan(params: dict, config: Config) -> dict:
         "min_confluence": config.strategy.min_confluence,
         "min_risk_reward": config.risk.min_risk_reward,
         "found": found,
-        "scanned": len(wanted),
+        "scanned": sum(1 for r in results if r.get("status") in ("signal", "no_setup")),
+        "requested": len(wanted),
         "sessions": [
             {"name": w.name, "local": w.label, "utc": w.utc_label}
             for w in session_windows(clock, config.strategy.sessions)
@@ -344,7 +356,31 @@ def scan(params: dict, config: Config) -> dict:
     }
     if len(signals) > 1:
         payload["exposure"] = analyse_exposure(signals, config, base_rates).to_dict()
+    if gapped:
+        payload["data_gaps"] = _data_gaps_payload(
+            [s for s in wanted if s in gapped], timeframe, source
+        )
     return payload
+
+
+def _data_gaps_payload(gaps: list[str], timeframe: Timeframe, source) -> dict:
+    """The pairs with no file, and the commands that fix all of them at once.
+
+    Structured rather than prose so the UI can render one notice instead of one
+    red row per pair. The pairs are still listed individually inside it: a pair
+    that quietly disappeared from the scan would be indistinguishable from a
+    pair that was looked at and found nothing.
+    """
+    return {
+        "count": len(gaps),
+        "symbols": gaps,
+        "timeframe": timeframe.name,
+        "directory": str(getattr(source, "directory", "")),
+        "commands": [
+            {"command": command, "note": note}
+            for command, note in fill_commands(timeframe, only_missing=True)
+        ],
+    }
 
 
 def _no_setup_payload(evaluation, config: Config) -> dict:
@@ -674,8 +710,11 @@ def pairs(params: dict, config: Config) -> dict:
     bars = _as_int(params, "bars", max(config.data.lookback_bars, 1500), 250, 8000)
     split = _as_float(params, "split", 0.7, 0.0, 0.9)
 
+    gapped = set(missing_symbols(source, wanted, timeframe))
     candles_by_symbol: dict[str, list[Candle]] = {}
     for symbol in wanted:
+        if symbol in gapped:
+            continue
         try:
             candles_by_symbol[symbol.upper()] = source.fetch(symbol, timeframe, bars)
         except TradingBotError:
@@ -686,6 +725,10 @@ def pairs(params: dict, config: Config) -> dict:
     )
     payload = report.to_dict()
     payload["bars_requested"] = bars
+    if gapped:
+        payload["data_gaps"] = _data_gaps_payload(
+            [s for s in wanted if s in gapped], timeframe, source
+        )
 
     if str(params.get("persistence", "0")).lower() in ("1", "true", "yes"):
         check = persistence_check(candles_by_symbol, config)

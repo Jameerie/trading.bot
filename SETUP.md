@@ -244,7 +244,8 @@ python3 -m trading_bot data --inspect data/samples/EURUSD_H1.csv
 
 ### Option B — live REST data
 
-Get a free key from [twelvedata.com](https://twelvedata.com), then:
+Get a free key from [twelvedata.com](https://twelvedata.com), then either read from
+the provider on every scan:
 
 ```bash
 export TRADING_BOT_API_KEY="your-key"
@@ -256,6 +257,20 @@ export TRADING_BOT_API_KEY="your-key"
 source = "rest"
 provider = "twelvedata"
 ```
+
+…or download once into `data/samples/` and keep scanning from disk, which is faster
+and costs no requests:
+
+```bash
+export TRADING_BOT_API_KEY="your-key"
+python3 -m trading_bot data --fetch --only-missing
+```
+
+That writes one CSV per configured symbol. The shipped config asks for all 64
+instruments and only three are bundled, so the first run downloads 61 files. It
+pauses 8 seconds between requests for the free tier's limit of eight a minute; pass
+`--pause 0` if your plan allows more. Pairs the provider does not carry are reported
+and skipped, and the run continues.
 
 ### Then calibrate before you trust it
 
@@ -349,6 +364,7 @@ python3 -m trading_bot journal                                # live performance
 |---|---|
 | `ModuleNotFoundError: trading_bot` | `export PYTHONPATH=src` from the repo root. |
 | `no CSV for EURUSD H1` | No data file. Run `python3 -m trading_bot data --generate`, or add your own export. |
+| Scan reports 61 pairs with no data | Expected on a fresh clone: the config scans all 64 instruments and 3 are bundled. `data --fetch --only-missing` downloads the rest (needs a key); `data --generate --only-missing` fills them with synthetic bars, which test the pipeline and are not a market. |
 | Phone cannot reach the server | You are on loopback. Restart with `--host 0.0.0.0` and set a token. Check the firewall allows 8787. |
 | `401 unauthorized` | A token is set. Use the full URL the server printed, including `?token=...`. |
 | Scan finds nothing, ever | Working as designed — it is selective. Lower `strategy.min_confluence`, then re-read the win rate. |

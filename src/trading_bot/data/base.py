@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
 from ..errors import DataError
@@ -15,6 +16,21 @@ class DataSource(Protocol):
     def fetch(self, symbol: str, timeframe: Timeframe, limit: int) -> list[Candle]:
         """Return up to ``limit`` candles, oldest first, ending at the latest close."""
         ...
+
+
+def missing_symbols(
+    source: DataSource, symbols: Iterable[str], timeframe: Timeframe
+) -> list[str]:
+    """Which symbols this source has nothing for, asked before any fetch.
+
+    A source that streams from an API cannot answer without spending a request,
+    so it does not implement ``missing`` and gets an empty list here; its
+    failures stay per-symbol errors, which is what they are. A directory of CSVs
+    *can* answer, and answering is what turns sixty identical "no CSV" errors
+    into one line naming the command that fixes them.
+    """
+    finder = getattr(source, "missing", None)
+    return list(finder(symbols, timeframe)) if callable(finder) else []
 
 
 def validate_series(candles: list[Candle], symbol: str = "") -> list[Candle]:

@@ -98,8 +98,69 @@ class TestScan:
         assert "candles" not in body["results"][0]
 
     def test_bad_symbol_reports_per_row_without_failing_the_scan(self, cfg):
+        """A symbol with no file still gets its own row, labelled for what it is.
+
+        The status used to be a flat ``error`` carrying the whole "no CSV for
+        ZZZZZZ, looked for..." sentence. It is ``no_data`` now so the UI can
+        group sixty of them behind one notice; a file that exists but cannot be
+        read is still ``error``, because that one really is per-pair.
+        """
         _, body = dispatch("/api/scan", "GET", {"source": "csv", "symbols": "ZZZZZZ"}, cfg)
-        assert body["results"][0]["status"] == "error"
+        assert body["results"][0]["symbol"] == "ZZZZZZ"
+        assert body["results"][0]["status"] == "no_data"
+        assert body["data_gaps"]["symbols"] == ["ZZZZZZ"]
+        assert body["scanned"] == 0
+        assert body["requested"] == 1
+
+    def test_pairs_with_no_file_are_grouped_into_one_notice(self, cfg):
+        """Sixty red rows saying the same sentence is how a fixable setup reads
+        as a broken program. The UI needs one block to render instead."""
+        _, body = dispatch(
+            "/api/scan", "GET",
+            {"source": "csv", "symbols": "EURUSD,EURNOK,XAUUSD", "chart": "0",
+             "base_rates": "0"},
+            cfg,
+        )
+        gaps = body["data_gaps"]
+        assert gaps["count"] == 2
+        assert gaps["symbols"] == ["EURNOK", "XAUUSD"]
+        assert gaps["timeframe"] == "H1"
+        assert [c["command"] for c in gaps["commands"]] == [
+            "python -m trading_bot data --fetch --only-missing --timeframe H1",
+            "python -m trading_bot data --generate --only-missing --timeframe H1",
+        ]
+
+    def test_a_pair_with_no_file_is_still_its_own_row(self, cfg):
+        """Grouped in the notice, but never dropped: a pair that vanished would
+        be indistinguishable from one that was looked at and found nothing."""
+        _, body = dispatch(
+            "/api/scan", "GET",
+            {"source": "csv", "symbols": "EURUSD,EURNOK", "chart": "0", "base_rates": "0"},
+            cfg,
+        )
+        assert [r["symbol"] for r in body["results"]] == ["EURUSD", "EURNOK"]
+        assert body["results"][1]["status"] == "no_data"
+
+    def test_the_count_is_what_was_scanned_not_what_was_asked_for(self, cfg):
+        """'0 of 64 scanned' when 61 had no data reads as a strategy result."""
+        _, body = dispatch(
+            "/api/scan", "GET",
+            {"source": "csv", "symbols": "EURUSD,EURNOK,XAUUSD", "chart": "0",
+             "base_rates": "0"},
+            cfg,
+        )
+        assert body["scanned"] == 1
+        assert body["requested"] == 3
+
+    def test_no_gap_block_when_every_pair_has_data(self, cfg):
+        _, body = dispatch(
+            "/api/scan", "GET",
+            {"source": "synthetic", "symbols": "EURUSD,EURNOK", "chart": "0",
+             "base_rates": "0"},
+            cfg,
+        )
+        assert "data_gaps" not in body
+        assert body["scanned"] == 2
 
     def test_symbol_limit(self, cfg):
         """The cap still bites — it just sits above the registry now.

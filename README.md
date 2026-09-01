@@ -119,7 +119,7 @@ either if it is missing. Run the same command again any time to restart; add
 bash trading-bot.sh --scan          # just tell me what to do right now
 bash trading-bot.sh --port 9000     # serve somewhere else
 bash trading-bot.sh --local-only    # this machine only, no phone access
-bash trading-bot.sh --test          # run the 433 tests before starting
+bash trading-bot.sh --test          # run the 609 tests before starting
 bash trading-bot.sh --help          # everything else
 ```
 
@@ -157,7 +157,7 @@ python -m trading_bot --config config/default.toml scan
 
 ```bash
 make demo    # scan, backtest and calibrate on the bundled data
-make test    # 433 tests, offline, ~25 seconds
+make test    # 609 tests, offline, ~40 seconds
 ```
 
 ### Commands
@@ -458,10 +458,21 @@ demo and tests run offline and deterministically. They are not a market, and res
 from them say nothing about live performance. Point the tool at your own broker's
 exported history to get numbers that mean something.
 
+Only EURUSD, GBPUSD and USDJPY are bundled, and the shipped config scans all 64
+instruments, so a fresh clone has no data for 61 of them. That is reported as one
+line naming the command that fixes it, not as 61 errors, and the pairs stay listed:
+a pair with no data is **unmeasured, not clear**. Fill them in one pass:
+
 ```bash
-python -m trading_bot data --generate --symbols EURUSD --bars 3000
+python -m trading_bot data --fetch    --only-missing   # real candles; needs a provider key
+python -m trading_bot data --generate --only-missing   # synthetic; pipeline testing only
 python -m trading_bot data --inspect data/samples/EURUSD_H1.csv
 ```
+
+`--fetch` writes one CSV per symbol from the configured provider and pauses between
+requests for the free tier's rate limit (`--pause 0` if your plan allows more).
+`--only-missing` leaves files you already have alone, so a broker export you dropped
+in yourself is never overwritten by a generated one.
 
 ## Project layout
 
@@ -473,7 +484,7 @@ src/trading_bot/
   config.py       instruments.py   sessions.py      journal.py
   risk_analysis.py                 limits.py
   strategy/       data/            web/             cli.py
-tests/            433 tests, no network, deterministic
+tests/            609 tests, no network, deterministic
 config/           default.toml
 data/samples/     synthetic OHLCV
 deploy/           systemd unit

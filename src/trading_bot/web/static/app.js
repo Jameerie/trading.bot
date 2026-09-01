@@ -508,7 +508,7 @@ async function runPairs() {
             an edge that survives today can still decay.`
         : 'No pair survives the correction on this sample. That is usually a sample too '
           + 'short, not a universe with no edge in it.'}</div>
-    </article>`;
+    </article>` + gapNotice(data.data_gaps, 'measured');
 }
 
 /* ---------------------------------------------------------- forecast view */
@@ -569,6 +569,30 @@ function limitBanner(limits) {
     </div>`;
 }
 
+/* Sixty pairs with no file is one setup problem, not sixty results. Rendering
+   it as sixty red rows buries the pairs that were actually scanned and reads
+   like a broken program, so it collapses to one notice that says what to run.
+   The pairs are still named inside it: a pair that vanished from the page would
+   be indistinguishable from one that was looked at and found nothing. */
+function gapNotice(gaps, verb = 'scanned') {
+  if (!gaps || !gaps.count) return '';
+  const where = gaps.directory ? ` in <code>${esc(gaps.directory)}</code>` : '';
+  const commands = (gaps.commands || []).map((c) => `
+    <li><code class="gap__cmd">${esc(c.command)}</code>
+        <span class="gap__note">${esc(c.note)}</span></li>`).join('');
+  return `<section class="gap">
+      <div class="gap__h">${gaps.count} pair${gaps.count === 1 ? '' : 's'} have no
+        ${esc(gaps.timeframe)} data${where} and were not ${verb}</div>
+      <p class="gap__sub">Unmeasured is not the same as no setup. Fill them in one
+        command:</p>
+      <ul class="gap__cmds">${commands}</ul>
+      <details class="gap__list">
+        <summary>Which pairs</summary>
+        <p class="gap__syms">${gaps.symbols.map(esc).join(', ')}</p>
+      </details>
+    </section>`;
+}
+
 async function runScan() {
   const params = {
     symbols: $('#scan-symbols').value.trim(),
@@ -582,9 +606,11 @@ async function runScan() {
   summary.hidden = false;
   const windows = (data.sessions || [])
     .map((w) => `${esc(w.name)} ${esc(w.local)}`).join(' &middot; ');
+  const gaps = data.data_gaps;
   summary.innerHTML =
     `<span><strong>${data.found}</strong> setup${data.found === 1 ? '' : 's'} found
        of ${data.scanned} scanned</span>
+     ${gaps ? `<span class="dim">${gaps.count} of ${data.requested} had no data</span>` : ''}
      <span>min R:R <strong>${data.min_risk_reward.toFixed(0)}:1</strong></span>
      <span>min confluence <strong>${fmtPct(data.min_confluence, 0)}</strong></span>
      <span>${esc(data.scanned_at_local || data.scanned_at)}</span>
@@ -597,19 +623,22 @@ async function runScan() {
       <div class="empty__sub">Add a symbol above.</div></div>`;
     return;
   }
-  // Signals first, then near misses, then the pairs with no data. A page that
-  // opens on sixty "no setup" cards has buried the one thing worth reading.
+  // Signals first, then near misses, then files that exist but could not be
+  // read. A page that opens on sixty "no setup" cards has buried the one thing
+  // worth reading. Pairs with no file at all are not rows here at all: they go
+  // into the single notice below, which is the only place with a fix to offer.
   const order = { signal: 0, no_setup: 1, error: 2 };
-  const rows = data.results.slice().sort((a, b) =>
-    (order[a.status] ?? 3) - (order[b.status] ?? 3)
-    || (b.confluence || 0) - (a.confluence || 0));
+  const rows = data.results
+    .filter((row) => row.status !== 'no_data')
+    .sort((a, b) => (order[a.status] ?? 3) - (order[b.status] ?? 3)
+      || (b.confluence || 0) - (a.confluence || 0));
 
   out.innerHTML = banner + exposureBlock(data.exposure) + rows.map((row) => {
     if (row.status === 'error') {
       return `<div class="err"><strong>${esc(row.symbol)}</strong> — ${esc(row.message)}</div>`;
     }
     return row.status === 'signal' ? signalCard(row) : noSetupCard(row);
-  }).join('');
+  }).join('') + gapNotice(gaps);
 
   if (data.found > 0) toast(`${data.found} setup${data.found === 1 ? '' : 's'} found`);
 }

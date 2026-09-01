@@ -1,6 +1,6 @@
 # How testing is conducted
 
-568 tests, no network, fully deterministic, ~38 seconds.
+609 tests, no network, fully deterministic, ~39 seconds.
 
 ```bash
 make test                              # everything
@@ -39,27 +39,27 @@ There are four such ways, and they map directly onto the test files:
 
 | File | Tests | Covers |
 |---|--:|---|
-| `test_web.py` | 55 | API handlers, auth, path traversal, static serving, body limits |
-| `test_models_config.py` | 50 | Candle validation, instruments, config loading, sessions |
-| `test_data.py` | 40 | CSV parsing, vendor date formats, resampling, synthetic generator |
+| `test_web.py` | 60 | API handlers, auth, path traversal, static serving, body limits |
+| `test_models_config.py` | 72 | Candle validation, instruments, config loading, sessions |
+| `test_data.py` | 54 | CSV parsing, vendor date formats, resampling, synthetic generator, filling a directory |
 | `test_signals_journal.py` | 37 | Signal construction, card rendering, confluence engine, scanning |
 | `test_risk_analysis.py` | 30 | Expectancy, Kelly, Monte Carlo sizing, misestimation |
-| `test_cli.py` | 28 | Every command end to end through the real entry point |
+| `test_cli.py` | 43 | Every command end to end through the real entry point |
 | `test_risk.py` | 28 | **The 1:4 floor**, stop placement, position sizing, pip value |
 | `test_structure.py` | 27 | Swings, trend, BOS/CHoCH, gaps, sweeps, **look-ahead guards** |
 | `test_journal_outcomes.py` | 26 | Realised R, closing trades, append-only history, live metrics |
-| `test_metrics.py` | 25 | Wilson intervals, drawdown, streaks, **the quality gate** |
+| `test_metrics.py` | 35 | Wilson intervals, drawdown, streaks, **the quality gate** |
 | `test_indicators.py` | 20 | EMA, SMA, RSI, ATR, ADX values and index alignment |
 | `test_backtest.py` | 18 | **Simulation realism** — fills, tie-breaking, gaps, overlap |
-| `test_precompute.py` | 7 | Cached and uncached evaluation produce identical signals |
+| `test_precompute.py` |  7 | Cached and uncached evaluation produce identical signals |
 | `test_edge.py` | 20 | Edge over chance; a planned ratio cannot manufacture one |
 | `test_limits.py` | 22 | Daily-loss and drawdown breakers; advisory, never blocking |
 | `test_playbook.py` | 26 | The guidance printed with every signal; the near-miss explanation |
 | `test_forecast.py` | 22 | Predictions, deadlines, settlement, **the forward record** |
 | `test_clock.py` | 21 | Local-time rendering; session windows in the reader's own clock |
-| `test_pairs.py` | 18 | Win rate by pair, **the multiple-comparison correction** |
+| `test_pairs.py` | 26 | Win rate by pair, **the multiple-comparison correction** |
 | `test_exposure.py` | 15 | Netted currency exposure; the module warns and never acts |
-| **Total** | **568** | |
+| **Total** | **609** | |
 
 ### The three failures the wider universe introduced
 
@@ -82,7 +82,7 @@ not have had, and each has a test pinning it:
 
 ## Layer 1 — Pure functions
 
-`test_indicators.py` (20), `test_models_config.py` (50)
+`test_indicators.py` (20), `test_models_config.py` (72)
 
 Indicators are pure functions over lists, so they are checked against values
 computed by hand: an EMA seeded with its SMA, an RSI of exactly 100 on a
@@ -154,7 +154,7 @@ signal card promised.
 
 ## Layer 5 — Statistical honesty
 
-`test_metrics.py` (25), `test_risk_analysis.py` (30)
+`test_metrics.py` (35), `test_risk_analysis.py` (30)
 
 Wilson intervals are checked against textbook values (85/100 → 76.7%–90.7%) and
 the critical values against known z-scores (1.9600, 2.5758, 1.6449).
@@ -191,7 +191,7 @@ bar 300.
 
 ## Layer 7 — Web and API
 
-`test_web.py` (54)
+`test_web.py` (60)
 
 API handlers are plain functions from a dict to a dict, so the whole API is
 tested without opening a socket. Then a real loopback server covers what only
@@ -210,10 +210,12 @@ HTTP can get wrong:
 
 ## Layer 8 — End to end
 
-`test_cli.py` (28)
+`test_cli.py` (43)
 
 Every command run through the real entry point against real files: `scan`,
-`backtest --split`, `calibrate`, `risk`, `journal --close`, `data --generate`.
+`backtest --split`, `calibrate`, `risk`, `journal --close`, `data --generate`,
+`data --fetch` (which is asserted to fail cleanly with no key rather than reach the
+network).
 These catch wiring mistakes that unit tests cannot — a renamed argument, a broken
 import, a command that no longer exists.
 
@@ -237,6 +239,11 @@ errors and horizontal overflow. That pass caught two real defects:
    pinned to the edge and marked `↗`.
 2. **Level labels were distorted.** The chart stretches non-uniformly to fill its
    column, which warped SVG text. Prices moved to an HTML legend.
+
+The no-data notice was rendered the same way before it shipped: desktop and mobile
+widths, light and dark, with the pair list expanded, checking `scrollWidth` against
+`innerWidth` at each size. The commands wrap rather than scroll for that reason — a
+command you have to drag sideways to read is a command nobody runs from a phone.
 
 A third was caught the same way when the Pairs view was added:
 
