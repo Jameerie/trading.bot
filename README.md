@@ -14,6 +14,14 @@ Those predictions are then settled against real candles, and the resulting forwa
 record is kept strictly apart from any backtest. A backtest replays outcomes that were
 already in the file; it cannot put a single entry on that board.
 
+The **ledger** keeps the case file for every call: all twelve checks the model ran,
+fired or not, the readings behind them, the claim and its deadlines, and then, once
+the market has answered, what actually happened bar by bar — where it filled, how far
+it went the right way and the wrong way, which level it reached, and the R and cash
+that produced. The same case files come out of a replay of history, labelled as the
+replay they are, so you can see the shape of the model's calls before it has earned a
+forward record.
+
 Times are shown in your own timezone (`Africa/Lagos` by default, UTC+1, no daylight
 saving), with the London, New York and Tokyo windows converted to your wall clock, so
 "the London open" means 08:00 on your morning rather than 07:00 on someone else's.
@@ -119,7 +127,7 @@ either if it is missing. Run the same command again any time to restart; add
 bash trading-bot.sh --scan          # just tell me what to do right now
 bash trading-bot.sh --port 9000     # serve somewhere else
 bash trading-bot.sh --local-only    # this machine only, no phone access
-bash trading-bot.sh --test          # run the 609 tests before starting
+bash trading-bot.sh --test          # run the 700 tests before starting
 bash trading-bot.sh --help          # everything else
 ```
 
@@ -157,7 +165,7 @@ python -m trading_bot --config config/default.toml scan
 
 ```bash
 make demo    # scan, backtest and calibrate on the bundled data
-make test    # 609 tests, offline, ~40 seconds
+make test    # 700 tests, offline, ~60 seconds
 ```
 
 ### Commands
@@ -168,6 +176,7 @@ make test    # 609 tests, offline, ~40 seconds
 | `scan` | Looks at the latest closed bar on every instrument and says what to do. **This is the product.** |
 | `pairs` | **Win rate pair by pair**, corrected for the fact that you looked at sixty. |
 | `forecast` | Live predictions, and the forward record of the ones already settled. |
+| `ledger` | **Every call the model made, what it saw, and what happened next.** Case files, scorecards, and what to do about each open call. `--replay` walks a history the same way. |
 | `backtest` | Measures the strategy on history. `--split 0.7` reports out-of-sample separately. |
 | `calibrate` | Sweeps the selectivity threshold and shows the win-rate / trade-count trade-off. |
 | `risk` | How much to risk per trade, and what it costs to be wrong. |
@@ -181,6 +190,9 @@ python -m trading_bot scan --symbols majors metals    # or a named group
 python -m trading_bot scan --brief                    # prices and reasoning, no coaching
 python -m trading_bot pairs --split 0.7               # which pairs are worth trading
 python -m trading_bot forecast --resolve              # settle predictions against real candles
+python -m trading_bot ledger --resolve                # settle, then every case file and scorecard
+python -m trading_bot ledger --open                   # open calls: where each stands, what to do now
+python -m trading_bot ledger --replay --csv data/samples/EURUSD_H1.csv --split 0.7
 python -m trading_bot backtest --csv data/samples/EURUSD_H1.csv --split 0.7 --trades
 python -m trading_bot risk --from-backtest --csv data/samples/EURUSD_H1.csv
 python -m trading_bot journal --close "EURUSD@2024-05-01T14:00:00+00:00" --exit 1.0865
@@ -205,7 +217,7 @@ working.
 
 ## The app
 
-Seven views, all working from the same engine the CLI uses:
+Eight views, all working from the same engine the CLI uses:
 
 - **Scan** — signal cards with a price chart, entry/stop/target, lot size, the full
   reasoning, the prediction it amounts to, and a collapsible playbook for placing it.
@@ -216,6 +228,10 @@ Seven views, all working from the same engine the CLI uses:
   corrected for how many pairs were inspected, plus a per-currency breakdown.
 - **Predictions** — live claims with their deadlines in your own clock, and the
   forward record of the settled ones.
+- **Ledger** — the case file for every call: what the model saw, what it claimed, what
+  happened, and what to do now about the ones still open. Scorecards by confidence,
+  check, pair, session and month, every rate with its interval and its n. A replay box
+  runs the same view over a history, labelled as a replay on every card.
 - **Backtest** — metrics, equity curve, and the in-sample vs out-of-sample gap.
 - **Calibrate** — the selectivity sweep as a table.
 - **Sizing** — Kelly, the recommended risk, and the drawdown each level costs.
@@ -350,6 +366,89 @@ produced its base rate. A prediction that has not resolved stays **open**; runni
 of data is not the same as running out of time, and force-closing one would quietly
 convert an unfinished claim into a scored one.
 
+## The ledger: every call, what it saw, what happened
+
+A win rate is a summary. The ledger is the evidence behind it, one call at a time:
+
+```bash
+python -m trading_bot ledger                  # the forward record, case files and scorecards
+python -m trading_bot ledger --open           # only the open calls, and what to do about each
+python -m trading_bot ledger --id "EURUSD@2026-09-01T13:00:00+00:00"
+python -m trading_bot ledger --replay --csv data/samples/USDJPY_H1.csv --split 0.7
+```
+
+Every case file has three parts. **The call**: direction, entry, stop, target, size,
+the deadline to enter by and the deadline to resolve by, the base rate it was quoted
+with. **What the model saw**: all twelve confluence checks, the ones that fired with
+their detail and the ones that did not by name, plus the readings — ATR, RSI, ADX, the
+directional index, the three EMAs, the higher-timeframe trend. **What happened**: the
+fill, the bars held, the best and worst point on the way in R and pips, which level was
+reached, the R and the cash at the size the card gave, and the closes from fill to exit.
+
+```
+==============================================================================
+  #5  BUY  USDJPY  [B] confidence 74%  4.0R     EXPIRED  +0.93R  (+90.41 USD)
+  US dollar against Japanese yen
+  REPLAY: the call the model would have made at Wed 24 Apr 11:00 WAT (10:00 UTC)
+==============================================================================
+  THE CALL       USDJPY rises to 169.335 before falling to 166.279, entered at
+                 the next bar's open
+  Entry 166.879   stop 166.279 (60.0 pips)   target 169.335 (245.6 pips)
+  Size 0.27 lots, risking 97.08 USD to make 388.32
+  Enter by Wed 24 Apr 14:00 WAT; resolves by Mon 06 May 19:00 WAT (200 bars)
+
+  WHAT THE MODEL SAW  (90 of 122 points, H1 close 166.879, London)
+    + HTF_ALIGN   20  H4 structure is trending up
+    + BOS         15  BOS long at 166.10999, 12 bar(s) ago
+    + STRUCTURE   15  market structure shows higher highs and higher lows
+    + EMA_STACK   12  EMA 21 > EMA 50 > EMA 200
+    - PULLBACK    12  not met: price has retraced into a zone worth entering
+    + ADX          8  ADX 51.5 is above the 20 trend threshold
+    ...
+    - RSI_ROOM     6  not met: momentum has room left to run
+    Readings: ATR 0.153; RSI 77.9; ADX 51.5; +DI 32.0; -DI 6.4; EMA 21/50/200
+      166.458 > 166.033 > 165.417; H4 trend up; H1 structure up
+
+  WHAT HAPPENED
+    EXPIRED. Filled at 166.890 on Wed 24 Apr 12:00 WAT; neither the target
+    nor the stop was touched inside the horizon, so it closed at 167.459
+    after 200 bar(s). Best point +3.40R, worst -0.16R. Result +0.93R =
+    +90.41 USD. A time-out is a real outcome and it counts.
+
+     bar  closed (WAT)      high      low    close R at close
+       0  24 Apr 12:00   166.955  166.814  166.930      +0.26  fill
+       ...
+     200  06 May 19:00   167.520  167.401  167.459      +0.93  exit
+
+    closes, fill to exit:  ▁▂▂▃▃▃▄▅▅▆▇▇█▇▆▆▅▅▅▄▄▅▅▆▆▆▅▅▄▄▅▅▄▄▅▅▅
+------------------------------------------------------------------------------
+```
+
+For every open call the ledger says where it stands against the latest candles and
+what to do now — and it says it conditionally, because it never placed the order and
+cannot know whether you did: *if you are not in, the window closed at 14:00, leave it;
+if you are in, hold, the stop and the target do not move; 72 pips to the target, 27 to
+the stop, +0.4R from the fill so far.*
+
+Then the scorecards, on resolved calls only, with n beside every rate:
+
+- **By the confidence the model quoted.** If 80% calls do not win more often than 72%
+  calls, the number is counting ticked boxes, not odds, and you should stop weighting
+  by it. This is the table that decides whether the grade means anything.
+- **By check.** Win rate when each check fired against when it did not. A check whose
+  absence costs nothing is a weight that is decoration; a check that fires on every
+  loser is a warning. Every signal cleared the threshold, so the "missing" side is thin
+  by construction, and the table says so.
+- **By pair, direction, session, grade and month.**
+
+The forward ledger and a replay never mix. A replay is the backtester's own walk with
+the case file kept for every trade, and `tests/test_ledger.py` asserts both that it
+reproduces the backtest trade for trade and that it never writes to the journal. A
+settled forward prediction carries the simulator's R — measured from the cost-adjusted
+fill, so never more flattering than the plan — and the deadlines it was made with are
+read back from the record, not recomputed, so changing the horizon later cannot move
+the goalposts on a claim already on file.
+
 ## Being told what to do, step by step
 
 The card does not stop at four prices. For every signal it prints the trade in plain
@@ -452,11 +551,21 @@ from the config file.
 
 ## Data
 
-Three sources: `csv` (default), `synthetic`, and `rest` (Twelve Data). The bundled
-files in `data/samples/` are **synthetic** — generated by a seeded random walk so the
-demo and tests run offline and deterministically. They are not a market, and results
-from them say nothing about live performance. Point the tool at your own broker's
-exported history to get numbers that mean something.
+Three sources: `csv` (default), `synthetic`, and `rest`. The bundled files in
+`data/samples/` are **synthetic** — generated by a seeded random walk so the demo and
+tests run offline and deterministically. They are not a market, and results from them
+say nothing about live performance. Real candles are one command away:
+
+```bash
+python -m trading_bot data --fetch            # real history for every instrument, no key
+```
+
+The `rest` source has two providers. **Dukascopy** is the shipped default: Dukascopy
+Bank's public datafeed carries every instrument in the registry, years back, and needs
+no account and no key, so a fresh clone can have real data for all 64 instruments in a
+few minutes with nothing to sign up for. **Twelve Data** is kept for anyone who already
+has a key (`TRADING_BOT_API_KEY`, `provider = "twelvedata"`). A broker export copied
+into the directory works too.
 
 Only EURUSD, GBPUSD and USDJPY are bundled, and the shipped config scans all 64
 instruments, so a fresh clone has no data for 61 of them. That is reported as one
@@ -464,15 +573,19 @@ line naming the command that fixes it, not as 61 errors, and the pairs stay list
 a pair with no data is **unmeasured, not clear**. Fill them in one pass:
 
 ```bash
-python -m trading_bot data --fetch    --only-missing   # real candles; needs a provider key
+python -m trading_bot data --fetch    --only-missing   # real candles from Dukascopy, no key
 python -m trading_bot data --generate --only-missing   # synthetic; pipeline testing only
 python -m trading_bot data --inspect data/samples/EURUSD_H1.csv
 ```
 
-`--fetch` writes one CSV per symbol from the configured provider and pauses between
-requests for the free tier's rate limit (`--pause 0` if your plan allows more).
-`--only-missing` leaves files you already have alone, so a broker export you dropped
-in yourself is never overwritten by a generated one.
+`--fetch` writes one CSV per symbol from the configured provider. Dukascopy paces
+itself; Twelve Data's free tier gets an 8-second pause between requests (`--pause 0`
+if your plan allows more). `--only-missing` leaves files you already have alone, so a
+broker export you dropped in yourself is never overwritten by a generated one.
+
+Then let the ledger keep score on the real thing: `scan` journals every call with its
+snapshot, `ledger --resolve` settles them as the bars arrive, and `ledger --replay`
+shows what the model would have said over the history you just fetched.
 
 ## Project layout
 
@@ -482,9 +595,10 @@ src/trading_bot/
   risk.py         signals.py       scanner.py       precompute.py
   backtest.py     metrics.py       calibrate.py     report.py
   config.py       instruments.py   sessions.py      journal.py
-  risk_analysis.py                 limits.py
+  forecast.py     ledger.py        pairs.py         exposure.py
+  playbook.py     clock.py         risk_analysis.py limits.py
   strategy/       data/            web/             cli.py
-tests/            609 tests, no network, deterministic
+tests/            700 tests, no network, deterministic
 config/           default.toml
 data/samples/     synthetic OHLCV
 deploy/           systemd unit
@@ -511,7 +625,9 @@ setup.sh          one-time setup; start.sh runs the app
   a coarse conversion so an 8-60 pip window written for majors means something on gold.
   It widens the window a structural stop may sit in; it never moves the stop.
 - The tool reads no economic calendar. It cannot know that CPI is out in ten minutes.
-- The REST source covers Twelve Data only; adding a provider means one class.
+- Two data providers, Dukascopy and Twelve Data; adding another means one class.
+  The Dukascopy reader follows the file format its open-source readers agree on and
+  is tested on files built in the suite, never against the live feed.
 - **It has no live track record.** Nothing here has been validated on real forward
   data — which is the reason `forecast` exists, and the reason that board starts at
   zero rather than being seeded from a backtest.

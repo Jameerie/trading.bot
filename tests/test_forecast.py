@@ -225,6 +225,33 @@ class TestScoreboard:
         assert board.resolved == 1
         assert board.still_open == 0
 
+    def test_resolving_records_the_path_and_the_simulators_r(self, tmp_path, config, gbpaud):
+        """What happened travels with the close, scored by the rule that made the base rate."""
+        journal = Journal(tmp_path / "j.jsonl")
+        index, signal = _first_signal(gbpaud, "GBPAUD", config)
+        journal.record(signal)
+
+        class _Source:
+            def fetch(self, symbol, timeframe, bars):
+                return gbpaud
+
+        reports = resolve_open_predictions(journal, _Source(), config)
+        entry = journal.read()[0]
+        expected = settle(signal, gbpaud, config)
+        assert entry.r_multiple == pytest.approx(expected.r_multiple, abs=1e-4)
+        assert entry.r_multiple == pytest.approx(reports[0]["r_multiple"], abs=1e-4)
+        assert entry.detail["fill_price"] == pytest.approx(expected.trade.fill_price)
+        assert entry.detail["bars_held"] == expected.trade.bars_held
+        assert len(entry.detail["path"]) == expected.trade.bars_held + 1
+        assert entry.detail["r_basis"] == "fill with costs"
+
+    def test_settlement_returns_the_trade_behind_it(self, config, gbpaud):
+        index, signal = _first_signal(gbpaud, "GBPAUD", config)
+        outcome = settle(signal, gbpaud, config)
+        assert outcome.trade is not None
+        assert outcome.entry_index == index + 1
+        assert outcome.trade.fill_price is not None
+
     def test_a_symbol_with_no_data_is_left_open_not_guessed(self, tmp_path, config, gbpaud):
         journal = Journal(tmp_path / "j.jsonl")
         _, signal = _first_signal(gbpaud, "GBPAUD", config)

@@ -53,6 +53,78 @@ class TestRouting:
             assert methods
 
 
+class TestLedger:
+    def test_an_empty_forward_ledger(self, cfg):
+        status, body = dispatch("/api/ledger", "GET", {}, cfg)
+        assert status == 200
+        assert body["origin"] == "forward"
+        assert body["summary"]["made"] == 0
+        assert body["cases"] == []
+        assert body["live"] == []
+        assert "before its outcome existed" in body["note"]
+
+    def test_replay_carries_the_whole_case_file(self, cfg):
+        status, body = dispatch(
+            "/api/ledger/replay", "GET",
+            {"symbol": "GBPAUD", "source": "synthetic", "bars": "1400"}, cfg,
+        )
+        assert status == 200
+        assert body["origin"] == "replay"
+        assert "not a track record" in body["note"]
+        assert body["count"] == len(body["cases"]) > 0
+        case = body["cases"][0]
+        assert len(case["checks"]) == 12
+        assert all("fired" in c for c in case["checks"])
+        assert case["result"]["path"]
+        assert case["result"]["narrative"]
+        assert case["made_at_local"]
+        assert body["scorecards"]["calibration"]
+        assert body["scorecards"]["checks"]
+        json.dumps(body)
+
+    def test_replay_split_is_reported(self, cfg):
+        status, body = dispatch(
+            "/api/ledger/replay", "GET",
+            {"symbol": "GBPAUD", "source": "synthetic", "bars": "1400", "split": "0.7"}, cfg,
+        )
+        assert status == 200
+        assert body["split"] == 0.7
+
+    def test_replay_rejects_nonsense(self, cfg):
+        status, body = dispatch(
+            "/api/ledger/replay", "GET", {"source": "synthetic", "bars": "10"}, cfg,
+        )
+        assert status == 400
+        assert "bars" in body["error"]
+
+    def test_journalled_scan_signals_carry_their_snapshot_into_the_ledger(self, cfg):
+        """A signal journalled from the browser is as complete a record as one from the CLI."""
+        from dataclasses import replace as _replace
+
+        loose = _replace(cfg, strategy=_replace(cfg.strategy, min_confluence=0.5))
+        status, scanned = dispatch(
+            "/api/scan", "GET",
+            {"symbols": "EURUSD,GBPUSD,USDJPY,GBPAUD,EURJPY,AUDUSD", "source": "synthetic",
+             "journal": "1", "chart": "0"},
+            loose,
+        )
+        assert status == 200
+        if not scanned["found"]:
+            pytest.skip("no signal on the synthetic universe at this threshold")
+        status, body = dispatch("/api/ledger", "GET", {"live": "0"}, loose)
+        assert status == 200
+        assert body["summary"]["made"] == scanned["found"]
+        assert all(case["snapshot_complete"] for case in body["cases"])
+        assert all(case["is_open"] for case in body["cases"])
+        assert body["live"] == [], "live=0 skips the candle fetches"
+
+        status, body = dispatch("/api/ledger", "GET", {"source": "synthetic"}, loose)
+        assert status == 200
+        assert len(body["live"]) == scanned["found"]
+        assert all(item["state"] for item in body["live"])
+        assert all(item["advice"] for item in body["live"])
+
+
 class TestHealthAndSettings:
     def test_health(self, cfg):
         status, body = dispatch("/api/health", "GET", {}, cfg)

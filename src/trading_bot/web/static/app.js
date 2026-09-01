@@ -919,6 +919,309 @@ async function closeTrade(id) {
   await loadJournal();
 }
 
+/* ------------------------------------------------------------ ledger view */
+
+/* Every prediction the model made, what it saw, and what happened next. The
+   forward record and a replay share this renderer; the origin label on the
+   first card is what tells them apart, and it is never omitted. */
+
+const VERDICT_CLASS = { RIGHT: 'right', WRONG: 'wrong', EXPIRED: 'expired', OPEN: 'open', FLAT: 'expired' };
+const VERDICT_OUTCOME = { RIGHT: 'win', WRONG: 'loss', EXPIRED: 'expired', OPEN: 'open', FLAT: 'flat' };
+
+function bucketRows(buckets) {
+  return buckets.map((b) => `<tr>
+      <td>${esc(b.label)}</td>
+      <td class="mono">${b.trades}</td>
+      <td class="mono">${b.wins}</td>
+      <td class="mono">${b.losses}</td>
+      <td class="mono">${fmtPct(b.win_rate, 0)}</td>
+      <td class="mono dim">${fmtPct(b.interval_low, 0)}–${fmtPct(b.interval_high, 0)}</td>
+      <td class="mono ${signClass(b.expectancy_r)}">${fmtR(b.expectancy_r)}</td>
+      <td class="mono ${signClass(b.total_r)}">${fmtR(b.total_r, 1)}</td>
+      <td class="mono ${signClass(b.cash)}">${fmtNum(b.cash, 0)}</td>
+    </tr>`).join('');
+}
+
+function bucketTable(title, buckets, note) {
+  if (!buckets || !buckets.length) return '';
+  return `<div class="tablewrap"><table>
+      <thead><tr><th>${esc(title)}</th><th>n</th><th>Right</th><th>Wrong</th><th>Win</th>
+        <th>95% interval</th><th>Exp</th><th>Total</th><th>Cash</th></tr></thead>
+      <tbody>${bucketRows(buckets)}</tbody></table></div>
+    ${note ? `<div class="card__foot">${note}</div>` : ''}`;
+}
+
+function ledgerSummaryCard(data) {
+  const s = data.summary;
+  const replay = data.origin === 'replay';
+  const title = replay
+    ? `Replay — ${esc(data.symbol || '')} ${esc(data.timeframe || '')}`
+    : 'Forward record';
+  const meta = replay
+    ? `${data.bars} bars · ${esc((data.first_bar || '').slice(0, 10))} to
+       ${esc((data.last_bar || '').slice(0, 10))}${data.split ? ' · out-of-sample tail' : ''}`
+    : `${esc(data.path || '')}`;
+  // The edge verdict has its own row above; the same sentence in the list
+  // would be the one thing on the card said twice.
+  const lines = (s.lines || []).filter((l) => !l.startsWith('Edge over chance'))
+    .map((l) => `<li>${esc(l)}</li>`).join('');
+  const kv = s.resolved ? `
+    <div class="kv">
+      <div class="kv__item"><div class="kv__k">Predictions</div>
+        <div class="kv__v">${s.made}</div></div>
+      <div class="kv__item"><div class="kv__k">Right / wrong</div>
+        <div class="kv__v"><span class="pos">${s.wins}</span> / <span class="neg">${s.losses}</span>
+          ${s.expired ? `<span class="ladder__sub">${s.expired} expired</span>` : ''}</div></div>
+      <div class="kv__item"><div class="kv__k">Win rate</div>
+        <div class="kv__v">${fmtPct(s.win_rate)} <span class="ladder__sub">${
+          fmtPct(s.interval_low, 0)}–${fmtPct(s.interval_high, 0)}</span></div></div>
+      <div class="kv__item"><div class="kv__k">Expectancy</div>
+        <div class="kv__v ${signClass(s.expectancy_r)}">${fmtR(s.expectancy_r)}</div></div>
+      <div class="kv__item"><div class="kv__k">Total</div>
+        <div class="kv__v ${signClass(s.total_r)}">${fmtR(s.total_r, 1)}</div></div>
+      <div class="kv__item"><div class="kv__k">Cash at card sizes</div>
+        <div class="kv__v ${signClass(s.cash_total)}">${fmtNum(s.cash_total, 0)} ${esc(s.currency)}</div></div>
+      <div class="kv__item"><div class="kv__k">Avg win / loss</div>
+        <div class="kv__v">${fmtR(s.average_win_r)} / ${fmtR(s.average_loss_r)}</div></div>
+      <div class="kv__item"><div class="kv__k">Deepest drawdown</div>
+        <div class="kv__v">${(s.max_drawdown_r || 0).toFixed(1)}R
+          <span class="ladder__sub">${s.max_loss_streak}L run</span></div></div>
+    </div>` : '';
+  return `
+    <article class="card">
+      <div class="card__head"><span class="card__sym">${title}</span>
+        <span class="chip">${replay ? 'replay — not a track record' : 'written down before the outcome'}</span>
+        <span class="chip">${s.resolved} resolved / ${s.made} made</span>
+        <span class="card__meta">${meta}</span></div>
+      ${kv}
+      ${s.resolved ? `<div class="verdict">
+        <span class="verdict__tag" data-v="${esc(s.edge.verdict)}">${esc(s.edge.verdict)}</span>
+        <span class="verdict__txt">${esc(s.edge.detail)}</span></div>` : ''}
+      <ul class="ledger__lines">${lines}</ul>
+      <div class="card__foot">${esc(data.note)}</div>
+    </article>`;
+}
+
+function liveCard(item) {
+  const long = item.direction === 'long';
+  const kv = item.current_price !== null && item.current_price !== undefined ? `
+    <div class="kv">
+      <div class="kv__item"><div class="kv__k">Price now</div>
+        <div class="kv__v">${esc(String(item.current_price))}</div></div>
+      <div class="kv__item"><div class="kv__k">From the fill</div>
+        <div class="kv__v ${signClass(item.unrealised_r)}">${fmtR(item.unrealised_r)}</div></div>
+      <div class="kv__item"><div class="kv__k">To target</div>
+        <div class="kv__v">${item.to_target_pips === null ? '-' : `${item.to_target_pips.toFixed(1)}p`}</div></div>
+      <div class="kv__item"><div class="kv__k">To stop</div>
+        <div class="kv__v">${item.to_stop_pips === null ? '-' : `${item.to_stop_pips.toFixed(1)}p`}</div></div>
+    </div>` : '';
+  const advice = (item.advice || []).map((a) => `<li>${esc(a)}</li>`).join('');
+  return `
+    <article class="card card--${long ? 'long' : 'short'}">
+      <div class="card__head">
+        <span class="side side--${long ? 'long' : 'short'}">${long ? 'Buy' : 'Sell'}</span>
+        <span class="card__sym">${esc(item.symbol)}</span>
+        <span class="state" data-s="${esc(item.state)}">${esc(item.state)}</span>
+        <span class="card__meta">${item.entry_deadline_local ? `enter by ${esc(item.entry_deadline_local)}<br>` : ''}
+          ${item.resolve_by_local ? `resolves by ${esc(item.resolve_by_local)}` : ''}</span>
+      </div>
+      ${kv}
+      <div class="why"><div class="why__h">What to do now</div>
+        <ul class="advice">${advice}</ul></div>
+    </article>`;
+}
+
+function checksList(checks) {
+  return `<ul class="checks">${(checks || []).map((c) => `
+    <li class="check ${c.fired ? 'is-on' : 'is-off'}">
+      <span class="check__mark">${c.fired ? '&#10003;' : '&#10007;'}</span>
+      <span class="check__code">${esc(c.code)}</span>
+      <span class="check__w">+${Number(c.weight).toFixed(0)}</span>
+      <span class="check__txt">${esc(c.fired ? c.detail : `not met: ${c.title}`)}</span>
+    </li>`).join('')}</ul>`;
+}
+
+function readingsLine(r, digits) {
+  if (!r || r.price === undefined) return '';
+  const p = (v) => (v === null || v === undefined ? '-' : Number(v).toFixed(digits));
+  const parts = [];
+  if (r.atr !== null && r.atr !== undefined) parts.push(`ATR ${p(r.atr)}`);
+  if (r.rsi !== null && r.rsi !== undefined) parts.push(`RSI ${Number(r.rsi).toFixed(1)}`);
+  if (r.adx !== null && r.adx !== undefined) parts.push(`ADX ${Number(r.adx).toFixed(1)}`);
+  if (r.plus_di !== null && r.plus_di !== undefined) {
+    parts.push(`+DI ${Number(r.plus_di).toFixed(1)} / -DI ${Number(r.minus_di).toFixed(1)}`);
+  }
+  if (r.ema_fast !== null && r.ema_fast !== undefined) {
+    parts.push(`EMA ${p(r.ema_fast)} · ${p(r.ema_slow)} · ${p(r.ema_trend)}`);
+  }
+  if (r.htf_trend) parts.push(`HTF ${r.htf_trend}`);
+  if (r.trend) parts.push(`structure ${r.trend}`);
+  if (r.last_break) {
+    parts.push(`${r.last_break.kind} ${r.last_break.direction} at ${p(r.last_break.level)},
+      ${r.last_break.bars_ago} bars before`);
+  }
+  return `<p class="readings">${esc(parts.join('  ·  '))}</p>`;
+}
+
+function caseCard(c, number) {
+  const s = c.signal;
+  const long = s.direction === 'long';
+  const d = c.digits ?? 5;
+  const verdict = c.verdict || 'OPEN';
+  const res = c.result;
+  const p = c.prediction || {};
+  const chart = res && res.path && res.path.length > 1
+    ? candleChart(res.path, { ...s, digits: d }) : '';
+  const outcomeKv = res ? `
+    <div class="kv">
+      <div class="kv__item"><div class="kv__k">Filled</div>
+        <div class="kv__v">${res.fill_price === null || res.fill_price === undefined
+          ? '-' : esc(fmtPrice(res.fill_price, d))}</div></div>
+      <div class="kv__item"><div class="kv__k">Exit</div>
+        <div class="kv__v">${res.exit_price === null || res.exit_price === undefined
+          ? '-' : esc(fmtPrice(res.exit_price, d))}</div></div>
+      <div class="kv__item"><div class="kv__k">Bars held</div>
+        <div class="kv__v">${res.bars_held ?? '-'}</div></div>
+      <div class="kv__item"><div class="kv__k">Best / worst</div>
+        <div class="kv__v">${fmtR(res.mfe_r)} / ${fmtR(res.mae_r)}</div></div>
+    </div>` : '';
+  return `
+    <details class="case case--${VERDICT_CLASS[verdict] || 'open'}">
+      <summary class="case__sum">
+        <span class="case__num">#${number}</span>
+        <span class="side side--${long ? 'long' : 'short'}">${long ? 'Buy' : 'Sell'}</span>
+        <strong>${esc(s.symbol)}</strong>
+        <span class="grade" data-g="${esc(s.grade)}">${esc(s.grade)}</span>
+        <span class="dim">${fmtPct(s.confidence, 0)} · ${Number(s.risk_reward).toFixed(1)}R</span>
+        <span class="case__when">${esc(c.made_at_local || (s.issued_at || '').slice(0, 16))}</span>
+        <span class="outcome" data-o="${VERDICT_OUTCOME[verdict] || 'open'}">${esc(verdict)}</span>
+        ${res ? `<span class="case__r ${signClass(res.r_multiple)}">${fmtR(res.r_multiple)}</span>
+          <span class="case__cash">${fmtNum(c.cash)} ${esc(s.account_currency || '')}</span>` : ''}
+      </summary>
+      <div class="case__body">
+        ${p.claim ? `<p class="case__claim">${esc(p.claim)}</p>` : ''}
+        ${ladder({ ...s, digits: d })}
+        <div class="kv">
+          <div class="kv__item"><div class="kv__k">Size</div>
+            <div class="kv__v">${Number(s.position_lots).toFixed(2)} lots</div></div>
+          <div class="kv__item"><div class="kv__k">Risking</div>
+            <div class="kv__v kv__v--neg">${esc(fmtNum(s.risk_amount))}</div></div>
+          <div class="kv__item"><div class="kv__k">Enter by</div>
+            <div class="kv__v" style="font-size:12px">${esc(p.entry_deadline_local || '-')}</div></div>
+          <div class="kv__item"><div class="kv__k">Resolves by</div>
+            <div class="kv__v" style="font-size:12px">${esc(p.resolve_by_local || '-')}</div></div>
+        </div>
+        <div class="why">
+          <div class="why__h">What the model saw — ${Number(s.score).toFixed(0)} of
+            ${Number(s.max_score).toFixed(0)} points · ${esc(c.session || '')}</div>
+          ${c.snapshot_complete ? '' : `<p class="partial">Recorded before the ledger kept
+            snapshots: the checks that did not fire are inferred, not recorded.</p>`}
+          ${checksList(c.checks)}
+          ${readingsLine(c.readings, d)}
+        </div>
+        <div class="happened">
+          <div class="why__h">What happened</div>
+          <p>${esc(res ? res.narrative : 'Nothing yet. The market has not answered.')}</p>
+          ${chart}
+        </div>
+        ${outcomeKv}
+        ${c.origin === 'replay' ? `<div class="card__foot">Replayed from history: the outcome
+          was in the file before this call was made.</div>` : ''}
+      </div>
+    </details>`;
+}
+
+function renderLedger(data) {
+  const out = $('#lg-results');
+  const sc = data.scorecards || {};
+  const live = (data.live || []).map(liveCard).join('');
+  const total = data.count || 0;
+  const cases = (data.cases || []).map((c, i) => caseCard(c, total - i)).join('');
+
+  if (!total) {
+    out.innerHTML = ledgerSummaryCard(data) + `<div class="empty">
+      <div class="empty__big">${data.origin === 'replay'
+        ? 'The model made no calls on this history' : 'No predictions on record yet'}</div>
+      <div class="empty__sub">${data.origin === 'replay'
+        ? 'Try a longer window or another pair.'
+        : 'Tick “Journal signals” on the Scan tab. Every signal issued is written down here before its outcome exists.'}</div>
+    </div>`;
+    return;
+  }
+
+  const checkRows = (sc.checks || []).map((e) => {
+    const f = e.fired, m = e.missing;
+    return `<tr>
+      <td class="mono">${esc(e.code)}</td>
+      <td class="mono">${Number(e.weight).toFixed(0)}</td>
+      <td class="mono">${f.trades ? `${fmtPct(f.win_rate, 0)} <span class="dim">n=${f.trades}</span>` : '-'}</td>
+      <td class="mono">${m.trades ? `${fmtPct(m.win_rate, 0)} <span class="dim">n=${m.trades}</span>` : '-'}</td>
+      <td class="mono ${e.difference === null ? '' : signClass(e.difference)}">${
+        e.difference === null ? 'n/a' : `${e.difference >= 0 ? '+' : ''}${(e.difference * 100).toFixed(0)} pts`}</td>
+    </tr>`;
+  }).join('');
+
+  const scorecards = data.summary.resolved ? `
+    <article class="card">
+      <div class="card__head"><span class="card__sym">Does the confidence number mean anything?</span>
+        <span class="card__meta">win rate by the confidence the model quoted</span></div>
+      ${bucketTable('Quoted', sc.calibration,
+        'If higher bands are not winning more often, the number counts boxes ticked, not odds. Read n first.')}
+    </article>
+    <article class="card">
+      <div class="card__head"><span class="card__sym">Which reasons travelled with the winners</span>
+        <span class="card__meta">win rate when a check fired vs when it did not</span></div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Check</th><th>Weight</th><th>Fired</th><th>Missing</th><th>Diff</th></tr></thead>
+        <tbody>${checkRows}</tbody></table></div>
+      <div class="card__foot">Every signal cleared the threshold, so most checks fired on most
+        calls and the missing column is thin by construction.</div>
+    </article>
+    <article class="card">
+      <div class="card__head"><span class="card__sym">By pair</span></div>
+      ${bucketTable('Pair', sc.symbol)}
+    </article>
+    <details class="card plan">
+      <summary class="plan__h">By grade, direction, session and month</summary>
+      ${bucketTable('Grade', sc.grade)}
+      ${bucketTable('Direction', sc.direction)}
+      ${bucketTable('Session', sc.session)}
+      ${bucketTable('Month', sc.month)}
+      ${(sc.strategy || []).length > 1 ? bucketTable('Model', sc.strategy) : ''}
+    </details>` : '';
+
+  out.innerHTML = ledgerSummaryCard(data)
+    + (live ? `<h2 class="stack__h">Open predictions — where each stands, and what to do now</h2>${live}` : '')
+    + scorecards
+    + `<h2 class="stack__h">Case files — ${data.shown} of ${total}, newest first</h2>`
+    + cases;
+}
+
+async function loadLedger() {
+  const data = await withBusy($('#lg-refresh'), 'Loading', () => api('/api/ledger'));
+  renderLedger(data);
+}
+
+async function resolveLedger() {
+  const data = await withBusy($('#lg-resolve'), 'Settling',
+    () => api('/api/forecast/resolve', { method: 'POST', body: {} }));
+  toast(`${data.resolved} of ${data.checked} settled`);
+  await loadLedger();
+}
+
+async function runReplay() {
+  const params = {
+    symbol: $('#lg-symbol').value.trim(),
+    source: $('#lg-source').value,
+    bars: $('#lg-bars').value,
+    split: $('#lg-split').value,
+  };
+  const data = await withBusy($('#lg-replay'), 'Replaying',
+    () => api('/api/ledger/replay', { params }));
+  renderLedger(data);
+  toast(`${data.count} call${data.count === 1 ? '' : 's'} replayed`);
+}
+
 /* --------------------------------------------------------------- bootstrap */
 
 function setupTabs() {
@@ -931,6 +1234,7 @@ function setupTabs() {
       $$('.view').forEach((v) => v.classList.toggle('is-active', v.id === `view-${button.dataset.view}`));
       if (button.dataset.view === 'journal') loadJournal().catch(() => {});
       if (button.dataset.view === 'forecast') loadForecast().catch(() => {});
+      if (button.dataset.view === 'ledger') loadLedger().catch(() => {});
     });
   });
 }
@@ -960,6 +1264,9 @@ async function bootstrap() {
   $('#pairs-run').addEventListener('click', () => runPairs().catch(() => {}));
   $('#fc-refresh').addEventListener('click', () => loadForecast().catch(() => {}));
   $('#fc-resolve').addEventListener('click', () => resolveForecasts().catch(() => {}));
+  $('#lg-refresh').addEventListener('click', () => loadLedger().catch(() => {}));
+  $('#lg-resolve').addEventListener('click', () => resolveLedger().catch(() => {}));
+  $('#lg-replay').addEventListener('click', () => runReplay().catch(() => {}));
 
   $('#risk-mode').addEventListener('change', (event) => {
     const fromBacktest = event.target.value === 'backtest';
@@ -996,6 +1303,7 @@ async function bootstrap() {
     $('#bt-symbol').value = firstPair;
     $('#cal-symbol').value = firstPair;
     $('#risk-symbol').value = firstPair;
+    $('#lg-symbol').value = firstPair;
 
     $('#foot-meta').textContent =
       `v${health.version} · ${settings.strategy.name} · min ${settings.risk.min_risk_reward}:1 · `

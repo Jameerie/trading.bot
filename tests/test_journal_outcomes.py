@@ -64,6 +64,49 @@ class TestRealisedR:
         assert classify_outcome(value) is expected
 
 
+class TestSnapshots:
+    def test_context_travels_with_the_signal(self, journal):
+        context = {"checks": [{"code": "ADX", "weight": 8.0, "fired": True, "detail": "ADX 31"}],
+                   "readings": {"adx": 31.2}}
+        journal.record(make_signal(), context=context)
+        entry = journal.read()[0]
+        assert entry.context == context
+        assert entry.detail == {}
+
+    def test_an_entry_without_context_reads_as_empty(self, journal):
+        journal.record(make_signal())
+        assert journal.read()[0].context == {}
+
+    def test_a_close_can_carry_the_simulators_r_and_detail(self, journal):
+        entry = journal.record(make_signal())
+        detail = {"fill_price": 1.1001, "bars_held": 7, "path": [[1704067200, 1.1, 1.11, 1.09, 1.105]]}
+        journal.close(entry.entry_id, exit_price=1.1085, r_multiple=4.13, detail=detail)
+        stored = journal.read()[0]
+        assert stored.r_multiple == pytest.approx(4.13)
+        assert stored.outcome == Outcome.WIN.value
+        assert stored.detail == detail
+
+    def test_without_an_override_r_is_measured_against_the_plan(self, journal):
+        entry = journal.record(make_signal())
+        journal.close(entry.entry_id, exit_price=1.1085)
+        assert journal.read()[0].r_multiple == pytest.approx(4.25)
+
+    def test_reasons_and_warnings_survive_the_round_trip(self, journal):
+        from dataclasses import replace
+        from trading_bot.journal import _signal_from_dict
+        from trading_bot.models import Reason
+
+        signal = replace(
+            make_signal(),
+            reasons=(Reason("ADX", "ADX 31 is above the 20 trend threshold", 8.0),),
+            warnings=("pip value approximate",),
+        )
+        journal.record(signal)
+        rebuilt = _signal_from_dict(journal.read()[0].signal)
+        assert rebuilt.reasons == signal.reasons
+        assert rebuilt.warnings == signal.warnings
+
+
 class TestRecording:
     def test_record_then_read(self, journal):
         entry = journal.record(make_signal())

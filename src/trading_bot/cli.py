@@ -31,6 +31,19 @@ from .forecast import (
 )
 from .instruments import expand_symbols, get_instrument, group_names
 from .journal import Journal
+from .ledger import (
+    ORIGIN_FORWARD,
+    ORIGIN_REPLAY,
+    format_case,
+    format_live,
+    format_scorecards,
+    format_table,
+    live_status,
+    load_cases,
+    replay,
+    snapshot,
+    summarise,
+)
 from .limits import evaluate_limits
 from .metrics import compute_metrics
 from .models import Timeframe, utc_now
@@ -127,6 +140,7 @@ def cmd_scan(args, config: Config) -> int:
     signals: list = []
     predictions: dict = {}
     base_rates: dict = {}
+    evaluations: dict = {}
     near_misses: list = []
     unavailable: list = []
 
@@ -144,6 +158,7 @@ def cmd_scan(args, config: Config) -> int:
 
         signal = evaluation.signal
         signals.append(signal)
+        evaluations[symbol] = evaluation
         # Measure the base rate only for pairs that actually signalled: it costs
         # a backtest per symbol, and a rate nobody will read is a rate not worth
         # computing.
@@ -168,7 +183,12 @@ def cmd_scan(args, config: Config) -> int:
                 ))
             print()
             if journal is not None:
-                journal.record_once(signal)
+                # The snapshot goes on the same line as the signal, so the ledger
+                # can later ask not just "was it right" but "was it right for
+                # the reasons it gave".
+                journal.record_once(signal, context=snapshot(
+                    evaluations[signal.symbol], config, predictions.get(signal.symbol)
+                ))
 
     # ---------------------------------------------------------- what was close
     ranked = sorted(
@@ -223,8 +243,8 @@ def cmd_scan(args, config: Config) -> int:
     print(f"  {len(signals)} setup(s) found across {len(symbols) - len(unavailable)} "
           f"instrument(s) scanned. {len(near_misses)} had none.")
     if signals and journal is not None:
-        print(f"  Recorded as predictions in {journal.path} — settle them later with:")
-        print("    python -m trading_bot forecast --resolve")
+        print(f"  Recorded as predictions in {journal.path} — settle and review them with:")
+        print("    python -m trading_bot ledger --resolve")
     if not signals:
         print("  Nothing met the rules. No setup is a position too.")
     # What could not be looked at goes last: it is a footnote about the data,
@@ -332,6 +352,206 @@ def cmd_forecast(args, config: Config) -> int:
     print()
     print("  A backtest cannot add a single trade to this number. That is the point of it.")
     print("=" * 78)
+    return 0
+
+
+def _print_settlements(reports: list[dict]) -> None:
+    """One line per open prediction examined by the resolver."""
+    if not reports:
+        print("  No open predictions to settle.")
+    for item in reports:
+        if item["status"] == "resolved":
+            print(f"  {item['symbol']:<8} {item['outcome']:<8} "
+                  f"{item['r_multiple']:+.2f}R   {item['detail']}")
+        else:
+            print(f"  {item['symbol']:<8} {item['status']:<8}          {item['detail']}")
+    print()
+
+
+def _live_reports(cases: list, config: Config, source) -> list:
+    """Judge every open case against the freshest candles the source has.
+
+    Candles are fetched once per symbol and timeframe: sixty open predictions
+    on three pairs is three requests, not sixty.
+    """
+    cache: dict = {}
+    reports = []
+    for case in cases:
+        key = (case.symbol, case.signal.timeframe)
+        if key not in cache:
+            try:
+                cache[key] = source.fetch(case.symbol, case.signal.timeframe,
+                                          config.data.lookback_bars)
+            except TradingBotError as exc:
+                cache[key] = exc
+        candles = cache[key]
+        if isinstance(candles, Exception):
+            reports.append((case, None, str(candles)))
+            continue
+        reports.append((case, live_status(case, candles, config), ""))
+    return reports
+
+
+def _print_ledger(cases: list, origin: str, config: Config, args, heading: list[str]) -> None:
+    """The ledger in full: the record, the table, the scorecards, the case files."""
+    clock = config.clock
+    width = 78
+    print("=" * width)
+    for line in heading:
+        print(f"  {line}")
+    print("=" * width)
+    summary = summarise(cases, config, origin)
+    for line in summary.lines(clock):
+        print(f"  {line}")
+    print()
+
+    if not cases:
+        return
+
+    print("-" * width)
+    print("  EVERY CALL, NEWEST FIRST")
+    print("-" * width)
+    for line in format_table(cases, clock):
+        print(line)
+    print()
+
+    if not args.brief:
+        print("-" * width)
+        print("  SCORECARDS  (resolved calls only; n beside every rate)")
+        print("-" * width)
+        for line in format_scorecards(cases, config):
+            print(line)
+        print()
+
+        shown = cases if args.all else cases[-args.limit:]
+        print("-" * width)
+        print(f"  CASE FILES  ({len(shown)} of {len(cases)}, newest first"
+              f"{'' if args.all else '; --all for every one, --id for one'})")
+        print("-" * width)
+        first_number = len(cases) - len(shown) + 1
+        for offset, case in enumerate(reversed(shown)):
+            number = first_number + len(shown) - 1 - offset
+            print()
+            for line in format_case(case, clock, config, number=number):
+                print(line)
+        print()
+
+
+def _export_cases(path: str, cases: list, origin: str, config: Config) -> None:
+    import json
+
+    clock = config.clock
+    payload = {
+        "origin": origin,
+        "exported_at": utc_now().isoformat(),
+        "summary": summarise(cases, config, origin).to_dict(clock),
+        "cases": [case.to_dict(clock) for case in cases],
+    }
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(payload, indent=1, sort_keys=True), encoding="utf-8")
+    print(f"  Wrote {len(cases)} case file(s) to {path}")
+
+
+def cmd_ledger(args, config: Config) -> int:
+    """Every prediction the model made, what it saw, and what happened next.
+
+    Two ledgers, never mixed. The forward ledger is the journal: calls written
+    down before their outcome existed, then settled by the backtest's own
+    resolver. A replay walks a history and shows what the model would have
+    said and what followed, labelled on every line as the replay it is.
+    """
+    clock = config.clock
+    print(BANNER)
+    print()
+
+    if args.replay:
+        candles = _load_candles(args, config)
+        if args.symbol:
+            symbol = args.symbol.upper()
+        elif args.csv:
+            symbol = Path(args.csv).stem.split("_")[0].upper()
+        else:
+            symbol = config.data.resolved_symbols[0]
+        split = None if args.split in (0, None) else args.split
+        start = int(len(candles) * split) if split else None
+        cases = replay(candles, symbol, config, start=start)
+        window = (
+            f"{clock.day(candles[start or 0].timestamp)} to {clock.day(candles[-1].timestamp)}"
+        )
+        heading = [
+            f"REPLAY  -  {symbol} {config.data.timeframe}, {len(candles) - (start or 0)} bars, "
+            f"{window}" + (f"  (out-of-sample tail, split {split})" if split else ""),
+            "What the model would have said at every bar, and what happened after.",
+            "The outcomes were in the file before the calls were made: this is a",
+            "backtest wearing a diary, not a track record. The forward ledger is.",
+        ]
+        _print_ledger(cases, ORIGIN_REPLAY, config, args, heading)
+        if args.export:
+            _export_cases(args.export, cases, ORIGIN_REPLAY, config)
+        return 0
+
+    journal = Journal(args.path or config.journal_path)
+    if args.resolve:
+        source = build_source(config, args.source)
+        print("Settling open predictions against real candles, by the backtest's rules...\n")
+        _print_settlements(resolve_open_predictions(journal, source, config))
+
+    cases = load_cases(journal, config)
+
+    if args.id:
+        wanted = args.id.strip().upper()
+        match = next((c for c in cases if c.id.upper() == wanted), None)
+        if match is None:
+            known = ", ".join(c.id for c in cases[-5:]) or "none"
+            print(f"error: no prediction with id {args.id!r}. Recent ids: {known}",
+                  file=sys.stderr)
+            return 2
+        if match.is_open:
+            source = build_source(config, args.source)
+            for case, status, problem in _live_reports([match], config, source):
+                print("  WHERE IT STANDS NOW")
+                if status is None:
+                    print(f"    could not judge it: {problem}")
+                else:
+                    for line in format_live(status, clock, config):
+                        print(line)
+                print()
+        for line in format_case(match, clock, config, number=cases.index(match) + 1):
+            print(line)
+        return 0
+
+    open_cases = [c for c in cases if c.is_open]
+    if open_cases:
+        source = build_source(config, args.source)
+        print("-" * 78)
+        print(f"  OPEN PREDICTIONS  ({len(open_cases)}) - where each stands, and what to do now")
+        print("-" * 78)
+        for case, status, problem in _live_reports(open_cases, config, source):
+            print()
+            if status is None:
+                print(f"  {case.signal.direction.value.upper():<5} {case.symbol}  "
+                      f"made {clock.stamp(case.made_at)}")
+                print(f"    could not judge it: {problem}")
+                continue
+            for line in format_live(status, clock, config):
+                print(line)
+        print()
+    if args.open:
+        if not open_cases:
+            print("  No open predictions.")
+        return 0
+
+    heading = [
+        "FORWARD LEDGER  -  every prediction written down before its outcome existed",
+        f"journal: {journal.path}",
+    ]
+    _print_ledger(cases, ORIGIN_FORWARD, config, args, heading)
+    if not cases:
+        print("  Run a scan with journalling on, and come back after the market has answered:")
+        print("    python -m trading_bot scan")
+        print("    python -m trading_bot ledger --resolve")
+    if args.export:
+        _export_cases(args.export, cases, ORIGIN_FORWARD, config)
     return 0
 
 
@@ -504,14 +724,18 @@ def cmd_data(args, config: Config) -> int:
             ) from exc
         pending = len(CsvSource(out_dir).missing(symbols, timeframe)) if args.only_missing \
             else len(symbols)
+        provider = config.data.provider.strip().lower()
+        pause = args.pause if args.pause is not None else (
+            8.0 if provider in ("twelvedata", "twelve_data", "td") else 0.0
+        )
         print(f"Fetching {pending} of {len(symbols)} symbol(s) at {timeframe.name} "
               f"from {config.data.provider} into {out_dir}")
-        if args.pause > 0 and pending > 1:
-            print(f"  Pausing {args.pause:g}s between requests for the provider's rate "
-                  f"limit, about {_humanise_seconds(args.pause * (pending - 1))} in total. "
+        if pause > 0 and pending > 1:
+            print(f"  Pausing {pause:g}s between requests for the provider's rate "
+                  f"limit, about {_humanise_seconds(pause * (pending - 1))} in total. "
                   f"Pass --pause 0 if your plan allows more.")
         print()
-        return _fill_files(source, symbols, timeframe, out_dir, args, pause=args.pause)
+        return _fill_files(source, symbols, timeframe, out_dir, args, pause=pause)
 
     if args.generate:
         code = _fill_files(
@@ -590,6 +814,32 @@ def build_parser() -> argparse.ArgumentParser:
     fc.add_argument("--path", help="journal file")
     fc.set_defaults(func=cmd_forecast)
 
+    lg = sub.add_parser("ledger",
+                        help="every prediction, what the model saw, and what happened")
+    lg.add_argument("--resolve", action="store_true",
+                    help="settle open predictions against real candles first")
+    lg.add_argument("--open", action="store_true",
+                    help="only the open predictions: where each stands and what to do now")
+    lg.add_argument("--id", metavar="ID", help="one prediction in full, e.g. EURUSD@2024-...")
+    lg.add_argument("--replay", action="store_true",
+                    help="walk a history instead: what the model would have said, and what "
+                         "followed (a backtest wearing a diary, labelled as such)")
+    lg.add_argument("--csv", help="history for --replay")
+    lg.add_argument("--symbol", help="symbol for --replay (inferred from the CSV name)")
+    lg.add_argument("--timeframe")
+    lg.add_argument("--source", choices=["csv", "rest", "synthetic"])
+    lg.add_argument("--bars", type=int, help="bars of history to replay")
+    lg.add_argument("--split", type=float, default=None, metavar="F",
+                    help="replay only the out-of-sample tail after this fraction (e.g. 0.7)")
+    lg.add_argument("--limit", type=int, default=10, metavar="N",
+                    help="how many case files to print in full (default 10, newest first)")
+    lg.add_argument("--all", action="store_true", help="print every case file in full")
+    lg.add_argument("--brief", action="store_true",
+                    help="the record and the table only; no scorecards or case files")
+    lg.add_argument("--export", metavar="PATH", help="also write every case file as JSON")
+    lg.add_argument("--path", help="journal file")
+    lg.set_defaults(func=cmd_ledger)
+
     back = sub.add_parser("backtest", help="measure the strategy on history")
     back.add_argument("--csv", help="path to an OHLCV CSV")
     back.add_argument("--symbol")
@@ -657,9 +907,10 @@ def build_parser() -> argparse.ArgumentParser:
     data.add_argument("--seed", type=int, default=42)
     data.add_argument("--only-missing", action="store_true",
                       help="leave symbols that already have a file alone")
-    data.add_argument("--pause", type=float, default=8.0,
-                      help="seconds between provider requests; free tiers allow "
-                           "about 8 a minute (default: 8)")
+    data.add_argument("--pause", type=float, default=None,
+                      help="seconds between provider requests. Default: 8 for Twelve Data, "
+                           "whose free tier allows about 8 a minute; 0 for Dukascopy, "
+                           "which paces itself")
     data.add_argument("--out", help="output directory")
     data.set_defaults(func=cmd_data)
 

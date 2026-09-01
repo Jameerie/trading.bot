@@ -43,6 +43,7 @@
   <button class="tabs__btn is-active" data-view="scan" role="tab" aria-selected="true">Scan</button>
   <button class="tabs__btn" data-view="pairs" role="tab" aria-selected="false">Pairs</button>
   <button class="tabs__btn" data-view="forecast" role="tab" aria-selected="false">Predictions</button>
+  <button class="tabs__btn" data-view="ledger" role="tab" aria-selected="false">Ledger</button>
   <button class="tabs__btn" data-view="backtest" role="tab" aria-selected="false">Backtest</button>
   <button class="tabs__btn" data-view="calibrate" role="tab" aria-selected="false">Calibrate</button>
   <button class="tabs__btn" data-view="risk" role="tab" aria-selected="false">Sizing</button>
@@ -131,6 +132,50 @@
     </div>
     <p class="hint">A backtest cannot add a single entry to this board. That is the point of it.</p>
     <div id="fc-results" class="stack"></div>
+  </section>
+
+  <!-- The ledger: every prediction, what the model saw when it made it, and
+       what the market did next. The forward record and a replay share one
+       renderer and are labelled apart, because only one of them is a record. -->
+  <section class="view" id="view-ledger" role="tabpanel">
+    <div class="controls">
+      <button class="btn btn--primary" id="lg-refresh" type="button">Refresh</button>
+      <button class="btn" id="lg-resolve" type="button">Settle against real candles</button>
+      <span class="controls__note">Every call the model made, what it saw, and what happened
+        next. Open the case file on any row.</span>
+    </div>
+    <details class="replay">
+      <summary>Replay a history instead: what the model would have said at every bar</summary>
+      <div class="controls">
+        <label class="field">
+          <span>Symbol</span>
+          <input id="lg-symbol" type="text" placeholder="EURUSD" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field">
+          <span>Data</span>
+          <select id="lg-source">
+            <option value="">config default</option>
+            <option value="csv">csv</option>
+            <option value="synthetic">synthetic</option>
+            <option value="rest">live (rest)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Bars</span>
+          <input id="lg-bars" type="number" value="3000" min="250" max="20000" step="250">
+        </label>
+        <label class="field">
+          <span>Window</span>
+          <select id="lg-split">
+            <option value="0">whole history</option>
+            <option value="0.7">last 30% only</option>
+            <option value="0.5">last 50% only</option>
+          </select>
+        </label>
+        <button class="btn" id="lg-replay" type="button">Replay</button>
+      </div>
+    </details>
+    <div id="lg-results" class="stack"></div>
   </section>
 
   <section class="view" id="view-backtest" role="tabpanel">

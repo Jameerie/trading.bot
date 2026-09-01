@@ -108,11 +108,19 @@ class TwelveDataSource:
 
 
 def build_rest_source(provider: str, api_key: str | None, timeout: float = 15.0):
-    """Factory so the CLI does not need to know provider class names."""
+    """Factory so the CLI does not need to know provider class names.
+
+    Dukascopy needs no key and is the shipped default; Twelve Data needs one and
+    stays available for anyone who already has it.
+    """
     name = provider.strip().lower()
     if name in ("twelvedata", "twelve_data", "td"):
         return TwelveDataSource(api_key or "", timeout)
+    if name in ("dukascopy", "duka"):
+        from .dukascopy import DukascopySource
+
+        return DukascopySource(timeout=max(timeout, 20.0))
     raise DataError(
-        f"unknown data provider {provider!r}. Supported: twelvedata. "
-        f"Add a class here implementing DataSource to support another."
+        f"unknown data provider {provider!r}. Supported: dukascopy, twelvedata. "
+        f"Add a class implementing DataSource to support another."
     )

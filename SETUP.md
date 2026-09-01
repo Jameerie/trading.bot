@@ -32,7 +32,7 @@ bash trading-bot.sh --scan          # print what to do right now, then exit
 bash trading-bot.sh --update        # pull the latest code first
 bash trading-bot.sh --port 9000     # serve on another port
 bash trading-bot.sh --local-only    # bind to this machine only
-bash trading-bot.sh --test          # run all 433 tests before starting
+bash trading-bot.sh --test          # run all 700 tests before starting
 bash trading-bot.sh --help          # the full list
 ```
 
@@ -88,7 +88,7 @@ python3 -m trading_bot --config config/default.toml serve --open
 ```
 
 ```bash
-make test     # 433 tests, offline, ~25 seconds
+make test     # 700 tests, offline, ~60 seconds
 make demo     # scan + backtest + calibrate on the bundled data
 ```
 
@@ -242,10 +242,36 @@ on are all recognised, as are the usual vendor date formats and epoch seconds.
 python3 -m trading_bot data --inspect data/samples/EURUSD_H1.csv
 ```
 
-### Option B — live REST data
+### Option B — real history from Dukascopy, no key
 
-Get a free key from [twelvedata.com](https://twelvedata.com), then either read from
-the provider on every scan:
+The shipped provider is Dukascopy Bank's public datafeed. It carries every instrument
+in the registry, years back, and needs no account:
+
+```bash
+python3 -m trading_bot data --fetch --only-missing
+```
+
+That writes one CSV per configured symbol into `data/samples/`. The shipped config asks
+for all 64 instruments and only three are bundled, so the first run downloads 61 files,
+one month of hourly candles at a time, pausing briefly between files. Pairs the feed
+does not carry are reported and skipped, and the run continues. Run it again whenever
+you want fresh bars; `--only-missing` off overwrites what is there.
+
+To read from the feed on every scan instead of from disk:
+
+```toml
+# config/default.toml
+[data]
+source = "rest"
+provider = "dukascopy"
+```
+
+The feed lags the market by roughly an hour, which is exactly right for a tool that
+acts on closed H1 bars.
+
+### Option C — Twelve Data, with a key
+
+If you already have a key from [twelvedata.com](https://twelvedata.com):
 
 ```bash
 export TRADING_BOT_API_KEY="your-key"
@@ -254,23 +280,11 @@ export TRADING_BOT_API_KEY="your-key"
 ```toml
 # config/default.toml
 [data]
-source = "rest"
 provider = "twelvedata"
 ```
 
-…or download once into `data/samples/` and keep scanning from disk, which is faster
-and costs no requests:
-
-```bash
-export TRADING_BOT_API_KEY="your-key"
-python3 -m trading_bot data --fetch --only-missing
-```
-
-That writes one CSV per configured symbol. The shipped config asks for all 64
-instruments and only three are bundled, so the first run downloads 61 files. It
-pauses 8 seconds between requests for the free tier's limit of eight a minute; pass
-`--pause 0` if your plan allows more. Pairs the provider does not carry are reported
-and skipped, and the run continues.
+`data --fetch` then pauses 8 seconds between requests for the free tier's limit of
+eight a minute; pass `--pause 0` if your plan allows more.
 
 ### Then calibrate before you trust it
 

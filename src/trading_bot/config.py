@@ -126,7 +126,7 @@ class DataConfig:
     timeframe: str = "H1"
     htf_timeframe: str = "H4"
     csv_dir: str = "data/samples"
-    provider: str = "twelvedata"
+    provider: str = "dukascopy"
     api_key_env: str = "TRADING_BOT_API_KEY"
     lookback_bars: int = 500
 

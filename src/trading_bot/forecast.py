@@ -38,7 +38,7 @@ from .config import Config
 from .errors import DataError
 from .instruments import Instrument, get_instrument
 from .metrics import Interval, Metrics, compute_metrics, measure_edge, wilson_interval
-from .models import Candle, Direction, Outcome, Signal, Timeframe, utc_now
+from .models import Candle, Direction, Outcome, Signal, Timeframe, Trade, utc_now
 from .sessions import is_weekend
 
 # A prediction whose base rate rests on fewer than this many past occurrences is
@@ -264,6 +264,10 @@ class Settlement:
     r_multiple: float | None
     bars_seen: int
     note: str
+    # The simulated trade behind a resolution, and where in ``candles`` it
+    # filled, so the ledger can keep the bars from fill to exit with the close.
+    trade: Trade | None = None
+    entry_index: int | None = None
 
 
 def settle(
@@ -330,6 +334,8 @@ def settle(
             else "hit the stop loss" if trade.outcome is Outcome.LOSS
             else f"closed on the {horizon}-bar horizon without touching either level"
         ),
+        trade=trade,
+        entry_index=index + 1,
     )
 
 
@@ -343,8 +349,14 @@ def resolve_open_predictions(journal, source, config: Config, limit: int = 200) 
 
     Returns one report dict per entry examined, so the caller can print what
     happened rather than silently mutating the log.
+
+    The close carries the simulator's own R — measured from the cost-adjusted
+    fill, so never more flattering than the plan — and the bars from fill to
+    exit, which is what lets the ledger show what happened rather than only
+    that it did.
     """
     from .journal import _signal_from_dict  # local: journal imports this module's types
+    from .ledger import outcome_detail  # local: the ledger imports this module
 
     reports: list[dict] = []
     timeframe = Timeframe.parse(config.data.timeframe)
@@ -371,11 +383,18 @@ def resolve_open_predictions(journal, source, config: Config, limit: int = 200) 
                             "detail": outcome.note})
             continue
 
+        detail = (
+            outcome_detail(outcome.trade, candles, outcome.entry_index)
+            if outcome.trade is not None and outcome.entry_index is not None
+            else None
+        )
         journal.close(
             entry.entry_id,
             exit_price=outcome.exit_price,
             closed_at=outcome.exit_time,
             note=f"auto-resolved: {outcome.note}",
+            r_multiple=outcome.r_multiple,
+            detail=detail,
         )
         reports.append({
             "id": entry.entry_id,

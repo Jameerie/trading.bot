@@ -37,6 +37,33 @@ def make_signal(direction=Direction.LONG, entry=1.1000, stop=1.0980, target=1.10
     )
 
 
+class TestRecordKeeping:
+    def test_the_fill_price_is_on_the_trade(self, config, eurusd):
+        """The fill is the next open moved against us; the trade must say what it was."""
+        candles = [
+            make_candle(0, 1.1000, 1.1005, 1.0995, 1.1000),
+            make_candle(1, 1.1002, 1.1010, 1.0998, 1.1005),
+            make_candle(2, 1.1005, 1.1090, 1.1000, 1.1080),
+        ]
+        trade = simulate_trade(candles, make_signal(), 0, config, eurusd)
+        assert trade.fill_price is not None
+        assert trade.fill_price > 1.1002, "spread and slippage move the fill against a long"
+        assert trade.to_dict()["fill_price"] == trade.fill_price
+
+    def test_evaluations_are_kept_only_when_asked(self, config):
+        from trading_bot.data.synthetic import SyntheticSource
+        from trading_bot.models import Timeframe
+
+        candles = SyntheticSource().fetch("GBPAUD", Timeframe.H1, 900)
+        plain = run_backtest(candles, "GBPAUD", config)
+        kept = run_backtest(candles, "GBPAUD", config, keep_evaluations=True)
+        assert plain.evaluations == []
+        assert len(kept.evaluations) == len(kept.trades)
+        for evaluation, trade in zip(kept.evaluations, kept.trades):
+            assert evaluation.signal == trade.signal
+        assert [t.r_multiple for t in kept.trades] == [t.r_multiple for t in plain.trades]
+
+
 class TestTieBreaking:
     def test_a_bar_hitting_both_levels_counts_as_a_loss(self, config, eurusd):
         """The single most important assumption in the simulator.

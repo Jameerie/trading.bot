@@ -1,6 +1,6 @@
 # How testing is conducted
 
-609 tests, no network, fully deterministic, ~39 seconds.
+700 tests, no network, fully deterministic, ~60 seconds.
 
 ```bash
 make test                              # everything
@@ -34,32 +34,35 @@ There are four such ways, and they map directly onto the test files:
 | **Selection** | Ranks sixty pairs and sells the luckiest as an edge | `test_pairs.py` |
 | **Replay as record** | Presents backtested history as a track record | `test_forecast.py` |
 | **Correlation blindness** | Counts four euro longs as four independent bets | `test_exposure.py` |
+| **Diary sold as record** | Lets a replayed outcome onto the forward ledger, or scores a call against a plan it did not fill | `test_ledger.py` |
 
 ## Full inventory
 
 | File | Tests | Covers |
 |---|--:|---|
-| `test_web.py` | 60 | API handlers, auth, path traversal, static serving, body limits |
+| `test_web.py` | 65 | API handlers, auth, path traversal, static serving, body limits, the ledger endpoints |
 | `test_models_config.py` | 72 | Candle validation, instruments, config loading, sessions |
 | `test_data.py` | 54 | CSV parsing, vendor date formats, resampling, synthetic generator, filling a directory |
 | `test_signals_journal.py` | 37 | Signal construction, card rendering, confluence engine, scanning |
 | `test_risk_analysis.py` | 30 | Expectancy, Kelly, Monte Carlo sizing, misestimation |
-| `test_cli.py` | 43 | Every command end to end through the real entry point |
+| `test_cli.py` | 53 | Every command end to end through the real entry point, `ledger` included |
 | `test_risk.py` | 28 | **The 1:4 floor**, stop placement, position sizing, pip value |
 | `test_structure.py` | 27 | Swings, trend, BOS/CHoCH, gaps, sweeps, **look-ahead guards** |
-| `test_journal_outcomes.py` | 26 | Realised R, closing trades, append-only history, live metrics |
+| `test_journal_outcomes.py` | 31 | Realised R, closing trades, append-only history, live metrics, snapshots and close detail |
 | `test_metrics.py` | 35 | Wilson intervals, drawdown, streaks, **the quality gate** |
 | `test_indicators.py` | 20 | EMA, SMA, RSI, ATR, ADX values and index alignment |
-| `test_backtest.py` | 18 | **Simulation realism** — fills, tie-breaking, gaps, overlap |
+| `test_backtest.py` | 20 | **Simulation realism** — fills, tie-breaking, gaps, overlap; the fill on the record |
 | `test_precompute.py` |  7 | Cached and uncached evaluation produce identical signals |
 | `test_edge.py` | 20 | Edge over chance; a planned ratio cannot manufacture one |
 | `test_limits.py` | 22 | Daily-loss and drawdown breakers; advisory, never blocking |
 | `test_playbook.py` | 26 | The guidance printed with every signal; the near-miss explanation |
-| `test_forecast.py` | 22 | Predictions, deadlines, settlement, **the forward record** |
+| `test_forecast.py` | 24 | Predictions, deadlines, settlement, **the forward record**, what a close carries |
 | `test_clock.py` | 21 | Local-time rendering; session windows in the reader's own clock |
 | `test_pairs.py` | 26 | Win rate by pair, **the multiple-comparison correction** |
 | `test_exposure.py` | 15 | Netted currency exposure; the module warns and never acts |
-| **Total** | **609** | |
+| `test_ledger.py` | 41 | Case files; **a replay equals the backtest and never touches the journal**; settlement detail; scorecards; what to do about an open call |
+| `test_dukascopy.py` | 26 | The datafeed decoder on files built in the test; the scale check; the month walk |
+| **Total** | **700** | |
 
 ### The three failures the wider universe introduced
 
@@ -294,3 +297,32 @@ And the one that matters most: when a test fails, establish whether the code or
 the fixture is wrong **before** changing either. Two of the failures found while
 building this suite were bad fixtures, and one was the system correctly reporting
 an outcome the test had not anticipated.
+
+---
+
+## The ledger, and the datafeed reader
+
+`test_ledger.py` (41), `test_dukascopy.py` (26)
+
+The ledger is where "what the model predicted" meets "what happened", so its tests
+guard the seam between the two. A replay must reproduce `run_backtest` trade for trade,
+and must leave the journal untouched — asserted directly, because the moment a replayed
+outcome can reach the forward record the record means nothing. A settled prediction must
+carry the simulator's own R, measured from the cost-adjusted fill rather than the plan,
+and the bars from fill to exit, so that "what happened" is a record and not a
+recollection. The snapshot journalled with a signal lists every check, fired or not, and
+comes back through the journal intact; the deadlines on a recorded claim are read back
+rather than recomputed, so a later change to the horizon cannot move the goalposts.
+The open-call advice is checked for saying both halves — *if you are in* and *if you
+are not* — because the tool never placed the order and cannot know which is true.
+
+The Dukascopy reader never sees the network in the suite. Its tests build `.bi5` files
+the way the datafeed serves them (fixed 24-byte records under LZMA), then check the
+decoded timestamps and prices, that the flat zero-volume hours of a closed market are
+dropped, that the 10^3 versus 10^5 scale is chosen from the instrument's digits and
+corrected by price magnitude when a three-decimal exotic is mislabelled, and that a
+currency which has moved thirtyfold is still treated as history rather than as a
+decimal error. The month walk is driven through a fake fetcher: it skips a current month
+with no file yet, stitches older months newest-first, counts only tradable hours toward
+what was asked for, resamples hourly files to H4 and minute files to M15, and gives up
+in a bounded number of requests on a symbol the feed does not carry.

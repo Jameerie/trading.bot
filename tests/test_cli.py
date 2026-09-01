@@ -6,6 +6,7 @@ wiring mistakes that unit tests on individual modules cannot.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -92,6 +93,94 @@ class TestScan:
             from trading_bot.journal import Journal
 
             assert Journal(journal).read()
+
+
+class TestLedger:
+    def test_replay_prints_the_record_the_table_and_the_case_files(self, sample_csv, capsys):
+        code = main(["ledger", "--replay", "--csv", str(sample_csv), "--limit", "1"])
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "REPLAY" in out
+        assert "not a track record" in out
+        assert "EVERY CALL" in out
+        assert "WHAT THE MODEL SAW" in out
+        assert "WHAT HAPPENED" in out
+        assert "CASE FILES  (1 of" in out
+
+    def test_replay_infers_the_symbol_from_the_file_name(self, sample_csv, capsys):
+        main(["ledger", "--replay", "--csv", str(sample_csv), "--brief"])
+        out = capsys.readouterr().out
+        assert "EURUSD H1" in out
+
+    def test_replay_out_of_sample_is_labelled(self, sample_csv, capsys):
+        main(["ledger", "--replay", "--csv", str(sample_csv), "--split", "0.7", "--brief"])
+        assert "out-of-sample tail" in capsys.readouterr().out
+
+    def test_brief_drops_the_scorecards(self, sample_csv, capsys):
+        main(["ledger", "--replay", "--csv", str(sample_csv), "--brief"])
+        out = capsys.readouterr().out
+        assert "SCORECARDS" not in out
+        assert "EVERY CALL" in out
+
+    def test_export_writes_json(self, sample_csv, tmp_path, capsys):
+        target = tmp_path / "out" / "ledger.json"
+        assert main([
+            "ledger", "--replay", "--csv", str(sample_csv), "--brief", "--export", str(target),
+        ]) == 0
+        import json
+
+        payload = json.loads(target.read_text())
+        assert payload["origin"] == "replay"
+        assert payload["cases"]
+        assert payload["cases"][0]["checks"]
+
+    def test_an_empty_forward_ledger_says_so(self, tmp_path, capsys):
+        journal = tmp_path / "j.jsonl"
+        assert main(["ledger", "--path", str(journal)]) == 0
+        out = capsys.readouterr().out
+        assert "FORWARD LEDGER" in out
+        assert "No predictions on record yet" in out
+        assert "REPLAY" not in out
+
+    def test_open_with_nothing_open(self, tmp_path, capsys):
+        assert main(["ledger", "--open", "--path", str(tmp_path / "j.jsonl")]) == 0
+        assert "No open predictions" in capsys.readouterr().out
+
+    def test_unknown_id_is_an_error_not_a_traceback(self, tmp_path, capsys):
+        code = main(["ledger", "--id", "EURUSD@nowhere", "--path", str(tmp_path / "j.jsonl")])
+        assert code == 2
+        err = capsys.readouterr().err
+        assert "no prediction with id" in err
+        assert "Traceback" not in err
+
+    def test_scan_then_ledger_shows_the_open_calls_and_what_to_do(self, tmp_path, capsys):
+        """The whole forward loop through the real entry point."""
+        config = tmp_path / "c.toml"
+        journal = tmp_path / "j.jsonl"
+        config.write_text(
+            f'journal_path = "{journal}"\n\n'
+            '[data]\nsource = "synthetic"\nsymbols = ["EURUSD", "GBPUSD", "USDJPY", "GBPAUD", '
+            '"EURJPY", "AUDUSD"]\nlookback_bars = 700\n\n'
+            '[strategy]\nmin_confluence = 0.55\n'
+        )
+        assert main(["--config", str(config), "scan", "--brief"]) == 0
+        capsys.readouterr()
+        if not journal.exists():
+            pytest.skip("the synthetic universe produced no signal at this threshold")
+        assert main(["--config", str(config), "ledger"]) == 0
+        out = capsys.readouterr().out
+        assert "OPEN PREDICTIONS" in out
+        assert "what to do now" in out
+        assert "FORWARD LEDGER" in out
+        assert "still open" in out
+        # The snapshot was journalled with the signal, so the case file is complete.
+        assert "WHAT THE MODEL SAW" in out
+        assert "inferred" not in out
+
+        first_id = json.loads(journal.read_text().splitlines()[0])
+        entry_id = f"{first_id['signal']['symbol']}@{first_id['signal']['issued_at']}"
+        assert main(["--config", str(config), "ledger", "--id", entry_id]) == 0
+        assert "WHERE IT STANDS NOW" in capsys.readouterr().out
 
 
 class TestBacktest:
@@ -193,14 +282,38 @@ class TestDataCommand:
         assert (tmp_path / "USDCAD_H1.csv").exists()
         assert len(list(tmp_path.glob("*_H1.csv"))) == 7
 
-    def test_fetch_without_a_key_is_a_clean_message_naming_the_alternative(self, capsys):
-        """No network is touched: the provider refuses to build without a key."""
-        code = main(["data", "--fetch", "--symbols", "EURNOK"])
+    def test_fetch_without_a_key_is_a_clean_message_naming_the_alternative(
+        self, tmp_path, capsys
+    ):
+        """No network is touched: Twelve Data refuses to build without a key."""
+        config = tmp_path / "c.toml"
+        config.write_text('[data]\nprovider = "twelvedata"\n')
+        code = main(["--config", str(config), "data", "--fetch", "--symbols", "EURNOK"])
         assert code == 2
         err = capsys.readouterr().err
         assert "Traceback" not in err
         assert "TRADING_BOT_API_KEY" in err
         assert "data --generate" in err
+
+    def test_fetch_from_dukascopy_needs_no_key_and_reports_a_dead_network(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The shipped provider builds without a key; a transport failure is one line."""
+        from trading_bot.data import dukascopy
+        from trading_bot.errors import DataError
+
+        def unreachable(url, timeout):
+            raise DataError("could not reach Dukascopy: test network is off")
+
+        monkeypatch.setattr(dukascopy, "_http_get", unreachable)
+        code = main([
+            "data", "--fetch", "--symbols", "EURNOK", "--out", str(tmp_path), "--pause", "0",
+        ])
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "Traceback" not in out
+        assert "from dukascopy" in out
+        assert "could not reach Dukascopy" in out
 
     def test_nothing_to_do_names_every_mode(self, capsys):
         assert main(["data"]) == 1

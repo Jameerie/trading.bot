@@ -28,7 +28,7 @@ from .instruments import get_instrument, pips_between, price_from_pips
 from .models import Candle, Direction, Outcome, Signal, Trade
 from .risk import total_cost_pips
 from .precompute import build_cache
-from .scanner import evaluate_at
+from .scanner import Evaluation, evaluate_at
 from .strategy import get_strategy
 
 
@@ -44,6 +44,10 @@ class BacktestResult:
     first_bar: str = ""
     last_bar: str = ""
     label: str = "all"
+    # One evaluation per trade, in the same order, when the caller asked for
+    # them. The ledger rebuilds "what the model saw" from these; nothing in the
+    # metrics reads them.
+    evaluations: list[Evaluation] = field(default_factory=list)
 
     @property
     def resolved(self) -> list[Trade]:
@@ -117,6 +121,7 @@ def simulate_trade(
             outcome=Outcome.LOSS,
             r_multiple=-1.0,
             bars_held=0,
+            fill_price=fill,
         )
 
     resolver = _hit_long if signal.direction is Direction.LONG else _hit_short
@@ -152,6 +157,7 @@ def simulate_trade(
             bars_held=i - entry_index,
             mae_r=round(mae, 3),
             mfe_r=round(mfe, 3),
+            fill_price=fill,
         )
 
     # Ran out of patience: close at the last bar's close and mark it expired.
@@ -167,6 +173,7 @@ def simulate_trade(
         bars_held=last - entry_index,
         mae_r=round(mae, 3),
         mfe_r=round(mfe, 3),
+        fill_price=fill,
     )
 
 
@@ -178,12 +185,18 @@ def run_backtest(
     end: int | None = None,
     label: str = "all",
     strategy=None,
+    keep_evaluations: bool = False,
 ) -> BacktestResult:
     """Walk the series bar by bar, taking one position at a time.
 
     ``start``/``end`` bound the *decision* bars, letting the caller split a series
     into in-sample and out-of-sample halves without ever letting the two share a
     trade.
+
+    ``keep_evaluations`` stores the evaluation behind each trade on the result,
+    so a replay can show every check the model ran, not just the ones that
+    fired. Off by default: a context holds the visible candle slice, and a
+    thousand of them is memory a calibration sweep does not need.
     """
     strategy = strategy or get_strategy(config.strategy.name)
     instrument = get_instrument(symbol)
@@ -217,6 +230,8 @@ def run_backtest(
         if trade is None:
             continue
         result.trades.append(trade)
+        if keep_evaluations:
+            result.evaluations.append(evaluation)
         busy_until = i + 1 + trade.bars_held
 
     return result

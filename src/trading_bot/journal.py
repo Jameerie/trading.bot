@@ -25,7 +25,7 @@ from pathlib import Path
 from .errors import DataError
 from .instruments import get_instrument, pips_between
 from .metrics import Metrics, compute_metrics
-from .models import Direction, Outcome, Signal, Timeframe, Trade, utc_now
+from .models import Direction, Outcome, Reason, Signal, Timeframe, Trade, utc_now
 
 # Event kinds written to the log.
 KIND_SIGNAL = "signal"
@@ -52,6 +52,12 @@ class JournalEntry:
     exit_price: float | None = None
     closed_at: datetime | None = None
     r_multiple: float | None = None
+    # What the model saw when it issued the signal (every check, fired or not,
+    # the indicator readings, the prediction it amounted to) and, once closed,
+    # what the market did (fill, excursions, the bars from fill to exit). Both
+    # are empty on entries written before the ledger existed.
+    context: dict = field(default_factory=dict)
+    detail: dict = field(default_factory=dict)
 
     @property
     def symbol(self) -> str:
@@ -117,18 +123,28 @@ class Journal:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
-    def record(self, signal: Signal, note: str = "") -> JournalEntry:
-        """Append a signal as issued."""
-        entry = JournalEntry(recorded_at=utc_now(), signal=signal.to_dict(), note=note)
-        self._append(
-            {
-                "kind": KIND_SIGNAL,
-                "recorded_at": entry.recorded_at.isoformat(),
-                "signal": entry.signal,
-                "outcome": None,
-                "note": note,
-            }
+    def record(self, signal: Signal, note: str = "", context: dict | None = None) -> JournalEntry:
+        """Append a signal as issued.
+
+        ``context`` is the snapshot of what the model saw — see
+        ``ledger.snapshot``. It is written on the same line as the signal so the
+        two can never drift apart, and so a later reader can judge not only
+        whether the call was right but whether it was right for the reasons
+        given.
+        """
+        entry = JournalEntry(
+            recorded_at=utc_now(), signal=signal.to_dict(), note=note, context=context or {}
         )
+        payload = {
+            "kind": KIND_SIGNAL,
+            "recorded_at": entry.recorded_at.isoformat(),
+            "signal": entry.signal,
+            "outcome": None,
+            "note": note,
+        }
+        if entry.context:
+            payload["context"] = entry.context
+        self._append(payload)
         return entry
 
     def already_recorded(self, signal: Signal) -> bool:
@@ -140,11 +156,13 @@ class Journal:
         target = signal_id(signal.symbol, signal.issued_at.isoformat())
         return any(entry.entry_id == target for entry in self.read())
 
-    def record_once(self, signal: Signal, note: str = "") -> JournalEntry | None:
+    def record_once(
+        self, signal: Signal, note: str = "", context: dict | None = None
+    ) -> JournalEntry | None:
         """Append a signal unless it is already journalled."""
         if self.already_recorded(signal):
             return None
-        return self.record(signal, note)
+        return self.record(signal, note, context)
 
     def close(
         self,
@@ -152,11 +170,20 @@ class Journal:
         exit_price: float,
         closed_at: datetime | None = None,
         note: str = "",
+        r_multiple: float | None = None,
+        detail: dict | None = None,
     ) -> JournalEntry:
         """Record how a journalled signal actually finished.
 
         Raises if the signal is unknown or already closed — silently accepting a
         second close would let one trade be scored twice.
+
+        ``r_multiple`` overrides the planned-entry arithmetic. The forward
+        resolver passes the simulator's own figure, which is measured from the
+        cost-adjusted fill and is therefore the *smaller* number on a win and
+        the same on a loss; a human closing a trade by hand leaves it unset and
+        gets R against the plan. ``detail`` carries what the market did on the
+        way — fill, excursions, the bars from fill to exit — for the ledger.
         """
         entries = {entry.entry_id: entry for entry in self.read()}
         entry = entries.get(entry_id)
@@ -168,28 +195,30 @@ class Journal:
                 f"{entry_id} is already closed as {entry.outcome} at {entry.exit_price}"
             )
 
-        r_value = realised_r(entry.signal, exit_price)
+        r_value = realised_r(entry.signal, exit_price) if r_multiple is None else float(r_multiple)
         outcome = classify_outcome(r_value)
         stamp = closed_at or utc_now()
         if stamp.tzinfo is None:
             raise DataError("closed_at must be timezone-aware UTC")
 
-        self._append(
-            {
-                "kind": KIND_CLOSE,
-                "recorded_at": utc_now().isoformat(),
-                "entry_id": entry_id,
-                "exit_price": exit_price,
-                "closed_at": stamp.isoformat(),
-                "outcome": outcome.value,
-                "r_multiple": round(r_value, 4),
-                "note": note,
-            }
-        )
+        payload = {
+            "kind": KIND_CLOSE,
+            "recorded_at": utc_now().isoformat(),
+            "entry_id": entry_id,
+            "exit_price": exit_price,
+            "closed_at": stamp.isoformat(),
+            "outcome": outcome.value,
+            "r_multiple": round(r_value, 4),
+            "note": note,
+        }
+        if detail:
+            payload["detail"] = detail
+        self._append(payload)
         entry.outcome = outcome.value
         entry.exit_price = exit_price
         entry.closed_at = stamp
         entry.r_multiple = round(r_value, 4)
+        entry.detail = dict(detail or {})
         if note:
             entry.note = note
         return entry
@@ -231,6 +260,7 @@ class Journal:
                     signal=raw.get("signal", {}),
                     outcome=raw.get("outcome"),
                     note=raw.get("note", ""),
+                    context=raw.get("context") or {},
                 )
                 entries.append(entry)
                 by_id[entry.entry_id] = entry
@@ -246,6 +276,7 @@ class Journal:
             entry.r_multiple = raw.get("r_multiple")
             closed = raw.get("closed_at")
             entry.closed_at = datetime.fromisoformat(closed) if closed else None
+            entry.detail = raw.get("detail") or {}
             if raw.get("note"):
                 entry.note = raw["note"]
 
@@ -345,7 +376,11 @@ class Journal:
 
 
 def _signal_from_dict(data: dict) -> Signal:
-    """Rebuild a Signal from its journalled form, for metric computation."""
+    """Rebuild a Signal from its journalled form, for metric computation.
+
+    Reasons and warnings come back too, so a card or a ledger entry rebuilt
+    from the journal reads exactly as it did when it was issued.
+    """
     return Signal(
         symbol=data["symbol"],
         timeframe=Timeframe.parse(data.get("timeframe", "H1")),
@@ -362,5 +397,12 @@ def _signal_from_dict(data: dict) -> Signal:
         position_lots=float(data.get("position_lots", 0.0)),
         position_units=float(data.get("position_units", 0.0)),
         risk_amount=float(data.get("risk_amount", 0.0)),
+        account_currency=str(data.get("account_currency", "USD")),
+        reasons=tuple(
+            Reason(str(r.get("code", "?")), str(r.get("detail", "")), float(r.get("weight", 0.0)))
+            for r in data.get("reasons", []) or []
+            if isinstance(r, dict)
+        ),
+        warnings=tuple(str(w) for w in data.get("warnings", []) or []),
         strategy=data.get("strategy", "unknown"),
     )

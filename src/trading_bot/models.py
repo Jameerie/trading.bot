@@ -240,6 +240,10 @@ class Trade:
     bars_held: int
     mae_r: float = 0.0
     mfe_r: float = 0.0
+    # The price the simulator actually filled at: the next bar's open moved
+    # against us by spread and slippage. None on trades rebuilt from a journal
+    # that predates the field.
+    fill_price: float | None = None
 
     @property
     def is_win(self) -> bool:
@@ -268,6 +272,9 @@ class Trade:
             "bars_held": self.bars_held,
             "grade": self.signal.grade,
             "score": self.signal.score,
+            "fill_price": self.fill_price,
+            "mae_r": self.mae_r,
+            "mfe_r": self.mfe_r,
         }
 
 

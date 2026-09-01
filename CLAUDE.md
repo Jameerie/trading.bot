@@ -79,17 +79,26 @@ src/trading_bot/
   backtest.py      Bar-by-bar simulation with intrabar SL/TP resolution
   metrics.py       Win rate + Wilson CI, expectancy, edge over chance, drawdown, streaks
   calibrate.py     Threshold sweep to find the selectivity that meets the target
-  journal.py       Append-only JSONL record of every signal issued
+  journal.py       Append-only JSONL record of every signal issued, with its snapshot
+  forecast.py      Predictions with deadlines and base rates; settlement; the forward scoreboard
+  ledger.py        Case files: what the model saw, what it claimed, what happened; scorecards;
+                   what to do about open calls; the replay diary
+  pairs.py         Win rate by pair with the multiple-comparison correction
+  exposure.py      Netted currency exposure across concurrent signals
+  playbook.py      The step-by-step guidance on every card, and the near-miss explanation
+  clock.py         Local-time rendering; sessions in the reader's own clock
   report.py        Markdown / terminal rendering
   risk_analysis.py Kelly, growth-optimal sizing, and the cost of a wrong estimate
   precompute.py    Causal series cache — the reason evaluation is linear, not quadratic
   limits.py        Daily-loss and drawdown circuit breakers — warn, never act
-  cli.py           Entry point: serve, scan, backtest, calibrate, risk, journal, data
+  cli.py           Entry point: serve, scan, pairs, forecast, ledger, backtest, calibrate,
+                   risk, journal, data
   data/
     base.py        DataSource protocol
     csv_source.py  OHLCV CSV loader
     synthetic.py   Deterministic generator — used by tests and demos
-    rest_source.py Twelve Data / generic REST via stdlib urllib
+    rest_source.py Twelve Data via stdlib urllib; the provider factory
+    dukascopy.py   Dukascopy datafeed: real candles for the whole registry, no key
   web/
     api.py         JSON handlers as pure dict -> dict functions (testable, no socket)
     server.py      http.server HTTP layer: routing, auth, static files
@@ -139,6 +148,28 @@ slice-based path in `build_context` is the source of truth — fix the cache, ne
 - **The limits warn; they never act.** `limits.py` may add a line to the signal card. It may not
   suppress a signal, resize a position, or gate a request — that would be the software deciding.
 
+**The ledger.** `ledger.py` builds a case file per prediction from the journal, and the
+same case file from a replay of history. Four things keep it honest, and each has a test:
+
+- **A replay never touches the journal.** `replay()` is `run_backtest` with the evaluations
+  kept; it reproduces the backtest trade for trade and writes nothing. Nothing may seed the
+  forward ledger from a replay or a backtest.
+- **The snapshot is written with the signal, on the same line.** `scan` journals every
+  check, fired or not, and the readings behind them, so the ledger can later ask not just
+  "was it right" but "was it right for the reasons it gave". Entries from before the
+  snapshot existed are reconstructed from the strategy's table and flagged as such.
+- **A settled prediction carries the simulator's R and the bars from fill to exit.** The
+  forward resolver passes `trade.r_multiple` into `journal.close`; that figure is measured
+  from the cost-adjusted fill and is never more flattering than the plan. A trade closed by
+  hand keeps R against the plan and is labelled `planned entry`.
+- **Deadlines are read back, not recomputed.** Changing `max_bars_in_trade` later must not
+  move the goalposts on a claim already on file.
+
+The scorecards read resolved cases only and hold themselves to `target.min_sample` before
+calling anything an edge or a failure. The calibration table (win rate by the confidence
+the model quoted) and the check table (win rate with and without each check) are there to
+tell the human how far to believe the grade; they change nothing the model does.
+
 **The web layer serves advice, not orders.** `web/` may read and journal; it must never gain a code
 path that places, modifies, or cancels a trade. Keep handlers in `api.py` as pure functions so they
 stay testable without a socket, and keep credentials out of every payload — `/api/settings` reports
@@ -152,7 +183,7 @@ than restating the signature. Match the surrounding file.
 ## 4. Commands
 
 ```bash
-make test            # pytest suite (609 tests)
+make test            # pytest suite (700 tests)
 make lint            # compile-check + import-clean check
 make demo            # end-to-end run on bundled sample data
 
@@ -162,6 +193,9 @@ python -m trading_bot backtest  --csv data/samples/EURUSD_H1.csv --split 0.7
 python -m trading_bot calibrate --csv data/samples/EURUSD_H1.csv
 python -m trading_bot risk      --from-backtest --csv data/samples/EURUSD_H1.csv
 python -m trading_bot journal   --close "EURUSD@..." --exit 1.0865
+python -m trading_bot ledger    --resolve                              # settle, then every case file
+python -m trading_bot ledger    --replay --csv data/samples/EURUSD_H1.csv --split 0.7
+python -m trading_bot data      --fetch --only-missing                 # real candles, Dukascopy, no key
 ```
 
 `scan` is the primary user-facing command, and the web **Scan** view is the same thing with a
@@ -198,6 +232,8 @@ chart. Its output is the product.
 - Caching of market data in the service worker. A stale signal is a wrong answer, not a
   degraded one; `sw.js` is network-only for `/api/` and must stay that way.
 - Position sizing that reads the win-rate point estimate instead of the interval's lower bound.
+- Anything that puts a replayed or backtested outcome on the forward ledger, or that
+  force-closes an open prediction because the data ran out rather than the time.
 
 The tool's job is to tell a human what it sees, how confident it is, and what it would risk. It
 stops there — on purpose.

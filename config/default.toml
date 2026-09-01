@@ -86,8 +86,13 @@ symbols = ["all"]
 timeframe = "H1"
 htf_timeframe = "H4"
 csv_dir = "data/samples"
-provider = "twelvedata"
-# The key is read from this environment variable. Never put a key in this file.
+# Where `data --fetch` and `--source rest` get real candles. "dukascopy" is
+# Dukascopy Bank's public datafeed: every instrument in the registry, years of
+# history, no account and no key. "twelvedata" needs a key and is kept for
+# anyone who already has one.
+provider = "dukascopy"
+# Twelve Data only. The key is read from this environment variable. Never put
+# a key in this file.
 api_key_env = "TRADING_BOT_API_KEY"
 lookback_bars = 500
 

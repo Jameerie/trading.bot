@@ -9,6 +9,7 @@ from .csv_source import (
     remedy,
     write_csv,
 )
+from .dukascopy import DukascopySource
 from .synthetic import SyntheticSource, generate, generate_trending
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "load_csv",
     "remedy",
     "write_csv",
+    "DukascopySource",
     "SyntheticSource",
     "generate",
     "generate_trending",

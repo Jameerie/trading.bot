@@ -42,6 +42,26 @@ from ..playbook import (
     timing_plan,
 )
 from ..journal import Journal
+from ..ledger import (
+    ORIGIN_FORWARD,
+    ORIGIN_REPLAY,
+    BAND_ORDER,
+    GRADE_ORDER,
+    breakdown,
+    by_direction,
+    by_grade,
+    by_month,
+    by_session,
+    by_strategy,
+    by_symbol,
+    calibration,
+    check_attribution,
+    live_status,
+    load_cases,
+    replay,
+    snapshot,
+    summarise,
+)
 from ..limits import evaluate_limits
 from ..metrics import compute_metrics, evaluate_gate, measure_edge
 from ..models import Candle, Signal, Timeframe
@@ -328,7 +348,9 @@ def scan(params: dict, config: Config) -> dict:
             row["status"] = "signal"
             row["signal"] = signal_payload(signal, config, prediction)
             if should_journal:
-                recorded = journal.record_once(signal)
+                recorded = journal.record_once(
+                    signal, context=snapshot(evaluation, config, prediction)
+                )
                 row["journalled"] = recorded is not None
         else:
             row["status"] = "no_setup"
@@ -821,6 +843,115 @@ def forecast_resolve(params: dict, config: Config) -> dict:
     }
 
 
+def _ledger_payload(cases: list, config: Config, origin: str, limit: int) -> dict:
+    """The shape both ledgers share: the record, the scorecards, the case files."""
+    clock = config.clock
+    confidence = config.target.confidence
+    resolved = [c for c in cases if c.is_resolved]
+    months = sorted({by_month(c) for c in resolved})
+    return {
+        "origin": origin,
+        "timezone": clock.zone_name,
+        "timezone_abbrev": clock.abbrev(),
+        "count": len(cases),
+        "shown": min(len(cases), limit),
+        "summary": summarise(cases, config, origin).to_dict(clock),
+        "scorecards": {
+            "calibration": [b.to_dict() for b in calibration(resolved, confidence)],
+            "grade": [b.to_dict() for b in breakdown(resolved, by_grade, confidence, GRADE_ORDER)],
+            "symbol": [b.to_dict() for b in breakdown(resolved, by_symbol, confidence)],
+            "direction": [
+                b.to_dict() for b in breakdown(resolved, by_direction, confidence, ["buy", "sell"])
+            ],
+            "session": [b.to_dict() for b in breakdown(resolved, by_session, confidence)],
+            "month": [b.to_dict() for b in breakdown(resolved, by_month, confidence, months)],
+            "strategy": [b.to_dict() for b in breakdown(resolved, by_strategy, confidence)],
+            "checks": [e.to_dict() for e in check_attribution(resolved, confidence)],
+            "bands": BAND_ORDER,
+        },
+        # Newest first: the call you are waiting on is the one you want at the top.
+        "cases": [c.to_dict(clock) for c in reversed(cases[-limit:])],
+        "note": (
+            "Replayed from history: every outcome was in the file before the call was "
+            "made. This is a backtest wearing a diary, not a track record."
+            if origin == ORIGIN_REPLAY else
+            "Every entry here was written down before its outcome existed, then settled "
+            "by the same rule the backtest uses. A backtest cannot add to it."
+        ),
+    }
+
+
+def ledger(params: dict, config: Config) -> dict:
+    """The forward ledger, with every open prediction judged against fresh candles.
+
+    ``live=0`` skips the candle fetches for a caller that only wants the record;
+    the open predictions are then listed with their case files but no status.
+    """
+    journal = Journal(config.journal_path)
+    clock = config.clock
+    limit = _as_int(params, "limit", 100, 1, 1000)
+    cases = load_cases(journal, config)
+    payload = _ledger_payload(cases, config, ORIGIN_FORWARD, limit)
+    payload["path"] = str(journal.path)
+
+    want_live = str(params.get("live", "1")).lower() not in ("0", "false", "no")
+    live = []
+    open_cases = [c for c in cases if c.is_open]
+    if want_live and open_cases:
+        source = _source_for(config, params.get("source"))
+        cache: dict = {}
+        for case in open_cases:
+            key = (case.symbol, case.signal.timeframe)
+            if key not in cache:
+                try:
+                    cache[key] = source.fetch(
+                        case.symbol, case.signal.timeframe, config.data.lookback_bars
+                    )
+                except TradingBotError as exc:
+                    cache[key] = exc
+            candles = cache[key]
+            if isinstance(candles, Exception):
+                live.append({
+                    "id": case.id,
+                    "symbol": case.symbol,
+                    "direction": case.direction.value,
+                    "state": "NO DATA",
+                    "advice": [f"could not judge it: {candles}"],
+                    "detail": str(candles),
+                })
+                continue
+            live.append(live_status(case, candles, config).to_dict(clock))
+    payload["live"] = live
+    return payload
+
+
+def ledger_replay(params: dict, config: Config) -> dict:
+    """What the model would have said at every bar of a history, and what followed."""
+    symbol = str(params.get("symbol") or config.data.resolved_symbols[0]).upper()
+    timeframe = Timeframe.parse(str(params.get("timeframe") or config.data.timeframe))
+    bars = _as_int(params, "bars", config.data.lookback_bars, 250, 20_000)
+    limit = _as_int(params, "limit", 100, 1, 1000)
+    source = _source_for(config, params.get("source"))
+    candles = source.fetch(symbol, timeframe, bars)
+
+    raw_split = params.get("split", 0)
+    fraction = None if raw_split in (None, "", 0, "0") else _as_float(
+        params, "split", 0.7, 0.1, 0.9
+    )
+    start = int(len(candles) * fraction) if fraction else None
+    cases = replay(candles, symbol, config, start=start)
+    payload = _ledger_payload(cases, config, ORIGIN_REPLAY, limit)
+    payload.update({
+        "symbol": symbol,
+        "timeframe": timeframe.name,
+        "bars": len(candles) - (start or 0),
+        "split": fraction,
+        "first_bar": candles[start or 0].timestamp.isoformat(),
+        "last_bar": candles[-1].timestamp.isoformat(),
+    })
+    return payload
+
+
 # Route table. Each entry is (handler, methods).
 ROUTES: dict[str, tuple] = {
     "/api/health": (health, ("GET",)),
@@ -830,6 +961,8 @@ ROUTES: dict[str, tuple] = {
     "/api/pairs": (pairs, ("GET", "POST")),
     "/api/forecast": (forecast, ("GET",)),
     "/api/forecast/resolve": (forecast_resolve, ("POST",)),
+    "/api/ledger": (ledger, ("GET",)),
+    "/api/ledger/replay": (ledger_replay, ("GET", "POST")),
     "/api/backtest": (backtest, ("GET", "POST")),
     "/api/calibrate": (calibrate, ("GET", "POST")),
     "/api/risk": (risk, ("GET", "POST")),
